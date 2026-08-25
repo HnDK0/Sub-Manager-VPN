@@ -64,6 +64,26 @@ func IsPublicURL(rawURL string) (bool, error) {
 	return IsPublicHost(u.Hostname())
 }
 
+// IsPublicLiteralIP reports whether host (with optional port) is a literal IP
+// address, and if so whether it is public. For a domain (non-literal) host it
+// returns (false, false, nil) so callers that only want to reject obvious
+// private/loopback literal hosts can check `isLiteral && !public`. We
+// deliberately do NOT resolve domains here: the authoritative SSRF check runs
+// at fetch time (fetch.assertSafeHost), which resolves and verifies the host
+// immediately before connecting — a live DNS lookup at add time is both fragile
+// (breaks offline/odd resolvers) and useless against DNS rebinding.
+func IsPublicLiteralIP(host string) (isLiteral bool, public bool, err error) {
+	hostOnly := host
+	if h, _, e := net.SplitHostPort(host); e == nil {
+		hostOnly = h
+	}
+	ip := net.ParseIP(hostOnly)
+	if ip == nil {
+		return false, false, nil
+	}
+	return true, isPublicIP(ip), nil
+}
+
 // ResolveAndCheckPublic resolves host (with optional port) and returns the first
 // public IP plus a bool. For a literal IP it returns (ip, isPublicIP(ip), nil).
 // For a domain it resolves via the same bounded resolver; if resolution fails it

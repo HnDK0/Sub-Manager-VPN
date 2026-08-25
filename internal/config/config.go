@@ -188,8 +188,15 @@ func (r *Registry) AddSource(rawURL string) (*Source, error) {
 	if !isHTTPS(rawURL) {
 		return nil, fmt.Errorf("config: only https sources are allowed, got %q", rawURL)
 	}
-	if ok, err := netutil.IsPublicURL(rawURL); err != nil || !ok {
-		return nil, fmt.Errorf("config: source host is not a public address: %s", rawURL)
+	// SSRF guard: reject obvious private/loopback literal hosts. We do NOT do a
+	// live DNS lookup for domains here — that is fragile (breaks offline/odd
+	// resolvers) and useless against DNS rebinding. The real public-address
+	// enforcement runs at fetch time in fetch.assertSafeHost, which resolves and
+	// verifies the host immediately before connecting.
+	if u, e := url.Parse(rawURL); e == nil {
+		if isLiteral, public, lerr := netutil.IsPublicLiteralIP(u.Hostname()); lerr == nil && isLiteral && !public {
+			return nil, fmt.Errorf("config: refusing non-public host: %s", rawURL)
+		}
 	}
 	existing, err := r.read()
 	if err != nil {
