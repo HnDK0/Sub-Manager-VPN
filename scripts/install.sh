@@ -129,6 +129,7 @@ fi
 
 # ── 3. Install systemd user service ────────────────────────────────────
 mkdir -p "$UNIT_DIR"
+MEMORY_MAX="${MEMORY_MAX:-}"
 cat > "$UNIT_PATH" <<EOF
 [Unit]
 Description=Sub Manager VPN (free VPN subscription manager)
@@ -140,7 +141,7 @@ Type=simple
 ExecStart=$BIN_PATH
 Restart=always
 RestartSec=5
-MemoryMax=512M
+${MEMORY_MAX:+MemoryMax=$MEMORY_MAX}
 Nice=10
 
 [Install]
