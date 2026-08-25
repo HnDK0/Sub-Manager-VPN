@@ -135,23 +135,36 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	serveAddr := st.ListenAddr // e.g. 127.0.0.1:18080
 	adminAddr := s.cfg.Addr    // e.g. 127.0.0.1:8090
 
+	// Collect all usable nginx server_name domains (for display + best-effort
+	// links). Skip placeholders that never resolve to a real public host.
+	var nginxDomains []string
+	seenDomain := make(map[string]bool)
+
 	// Derive public subscription/admin URLs from the installed nginx config.
 	publicByFile := make(map[string]string)
 	var publicAdmin string
+	serveMatched := false
+	adminMatched := false
 	for _, srv := range s.pub.ParseNginxServers() {
 		var name string
 		for _, nm := range srv.Names {
-			if nm == "*" || nm == "_" {
+			if nm == "*" || nm == "_" || nm == "" || nm == "default_server" {
 				continue
 			}
-			name = nm
-			break
+			if !seenDomain[nm] {
+				seenDomain[nm] = true
+				nginxDomains = append(nginxDomains, nm)
+			}
+			if name == "" {
+				name = nm
+			}
 		}
 		if name == "" {
 			continue
 		}
 		for locPath, target := range srv.LocProxy {
 			if target == serveAddr {
+				serveMatched = true
 				base := "https://" + name + ensureTrailingSlash(locPath)
 				for _, fn := range names {
 					if publicByFile[fn] == "" {
@@ -159,10 +172,29 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			} else if target == adminAddr {
+				adminMatched = true
 				if publicAdmin == "" {
 					publicAdmin = "https://" + name + ensureTrailingSlash(locPath)
 				}
 			}
+		}
+	}
+
+	// Best-effort fallback: nginx is detected but no proxy_pass exactly matched
+	// the serve/admin addr (e.g. it used `localhost`). Guess the public link from
+	// the known sub/admin path. Never invent links when nginx isn't detected.
+	if len(nginxDomains) > 0 {
+		first := nginxDomains[0]
+		if !serveMatched {
+			base := "https://" + first + "/s/" + st.Token + "/"
+			for _, fn := range names {
+				if publicByFile[fn] == "" {
+					publicByFile[fn] = base + fn
+				}
+			}
+		}
+		if !adminMatched && publicAdmin == "" {
+			publicAdmin = "https://" + first + "/" + s.cfg.Secret + "/"
 		}
 	}
 
@@ -192,6 +224,7 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		"adminNginxSnippet": adminSnippet,
 		"httpds":            s.pub.DetectHTTPD(),
 		"publicAdmin":       publicAdmin,
+		"nginxDomains":      nginxDomains,
 	})
 }
 

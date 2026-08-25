@@ -248,6 +248,11 @@ func proxyPassTarget(block string) string {
 	target := strings.Trim(m[1], `"'`)
 	target = strings.TrimPrefix(target, "https://")
 	target = strings.TrimPrefix(target, "http://")
+	// Treat `localhost` as 127.0.0.1 so a proxy_pass to localhost:PORT still
+	// matches the serve/admin addr (which is bound to 127.0.0.1:PORT).
+	if strings.HasPrefix(target, "localhost:") {
+		target = "127.0.0.1:" + target[len("localhost:"):]
+	}
 	if slash := strings.Index(target, "/"); slash >= 0 {
 		target = target[:slash]
 	}

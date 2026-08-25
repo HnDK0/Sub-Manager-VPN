@@ -622,6 +622,11 @@ async function loadPublish() {
     $("sub-pub-nginx").innerHTML = d.nginxSnippet
       ? `<h3 style="margin-top:12px;margin-bottom:6px;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em">nginx snippet · подписки</h3><pre class="log-box" style="max-height:120px">${esc(d.nginxSnippet)}</pre>`
       : "";
+    const domains = d.nginxDomains || [];
+    $("sub-pub-nginx-domains").innerHTML = domains.length
+      ? `<h3 style="margin-top:12px;margin-bottom:6px;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em">Detected nginx domains</h3><ul style="list-style:none;padding:0">${domains.map(dn =>
+          `<li style="padding:4px 0"><span class="chip chip-ok">${esc(dn)}</span></li>`).join("")}</ul>`
+      : `<h3 style="margin-top:12px;margin-bottom:6px;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em">Detected nginx domains</h3><div style="color:var(--muted);font-size:12px">nginx domains not detected (config not found or no server_name)</div>`;
     $("sub-pub-nginx-admin").innerHTML =
       (d.adminNginxSnippet
         ? `<h3 style="margin-top:12px;margin-bottom:6px;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em">nginx snippet · админка (SSE)</h3><pre class="log-box" style="max-height:160px">${esc(d.adminNginxSnippet)}</pre>`

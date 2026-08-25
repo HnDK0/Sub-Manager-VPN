@@ -95,6 +95,24 @@ http {
 	}
 }
 
+func TestParseNginxServersLocalhost(t *testing.T) {
+	src := `
+server {
+    server_name vpn.example.com;
+    location /s/tok/ {
+        proxy_pass http://localhost:18080/s/tok/;
+    }
+}
+`
+	servers := parseNginxServersIn(src)
+	if len(servers) != 1 {
+		t.Fatalf("got %d servers, want 1", len(servers))
+	}
+	if got := servers[0].LocProxy["/s/tok/"]; got != "127.0.0.1:18080" {
+		t.Fatalf("localhost proxy target = %q, want 127.0.0.1:18080", got)
+	}
+}
+
 func TestParseNginxServersNoPanic(t *testing.T) {
 	c := NewController(t.TempDir(), "127.0.0.1:18080", "")
 	// On non-Linux (no /etc/nginx) this returns nil; must not panic.
