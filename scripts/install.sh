@@ -46,27 +46,35 @@ gen_secret() {
 echo "== Sub Manager VPN installer =="
 
 # ── 1. Obtain the binary ────────────────────────────────────────────────
-if [ -x "$BIN_PATH" ] && [ "${FORCE:-0}" != "1" ]; then
-  echo "binary already present at $BIN_PATH (FORCE=1 to overwrite)"
-else
-  mkdir -p "$INSTALL_DIR"
-  if [ -n "$REPO" ]; then
-    url="https://raw.githubusercontent.com/$REPO/$BRANCH/bin/submanager-linux"
-    echo "downloading $url"
-    if command -v curl >/dev/null 2>&1; then
-      curl -fL "$url" -o "$BIN_PATH"
-    else
-      wget -O "$BIN_PATH" "$url"
-    fi
-  elif [ -f go.mod ]; then
-    echo "building from current directory (requires Go 1.25+)"
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-      go build -trimpath -ldflags "-s -w" -o "$BIN_PATH" .
+# Always fetch the latest published binary so re-running the installer
+# updates it (no manual FORCE / scp dance). A local build is used only
+# when REPO is empty (running inside a cloned repo).
+mkdir -p "$INSTALL_DIR"
+if [ -n "$REPO" ]; then
+  url="https://raw.githubusercontent.com/$REPO/$BRANCH/bin/submanager-linux"
+  echo "downloading $url"
+  tmp="$BIN_PATH.tmp"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fL "$url" -o "$tmp" || { echo "error: failed to download $url" >&2; rm -f "$tmp"; exit 1; }
   else
-    echo "error: set REPO=owner/repo to download, or run inside the cloned repo to build." >&2
+    wget -q -O "$tmp" "$url" || { echo "error: failed to download $url" >&2; rm -f "$tmp"; exit 1; }
+  fi
+  if [ ! -s "$tmp" ]; then
+    echo "error: downloaded binary is empty (check $url)" >&2
+    rm -f "$tmp"
     exit 1
   fi
+  mv -f "$tmp" "$BIN_PATH"
   chmod +x "$BIN_PATH"
+  echo "binary updated at $BIN_PATH"
+elif [ -f go.mod ]; then
+  echo "building from current directory (requires Go 1.25+)"
+  CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -trimpath -ldflags "-s -w" -o "$BIN_PATH" .
+  chmod +x "$BIN_PATH"
+else
+  echo "error: set REPO=owner/repo to download, or run inside the cloned repo to build." >&2
+  exit 1
 fi
 
 # ── 2. Write config.json with randomized secrets ───────────────────────
