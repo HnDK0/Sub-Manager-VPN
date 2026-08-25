@@ -347,9 +347,9 @@ func (t *tokenLimiter) allow(ip string) bool {
 }
 
 // hashNode replicates scheduler/state nodeHash (sha256 of
-// protocol|host|port|user) so the web layer can key CachedNodes entries without
-// touching unexported engine code.
+// protocol|host|port|user|security|encryption) so the web layer can key
+// CachedNodes entries without touching unexported engine code.
 func hashNode(n model.Node) string {
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%d|%s", n.Protocol, n.Host, n.Port, n.User)))
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%d|%s|%s|%s", n.Protocol, n.Host, n.Port, n.User, n.Security, n.Encryption)))
 	return hex.EncodeToString(sum[:])
 }

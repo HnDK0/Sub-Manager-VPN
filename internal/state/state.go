@@ -247,9 +247,11 @@ func (s *State) addColumnIfNotExists(table, col, def string) error {
 	return nil
 }
 
-// nodeHash computes a stable dedup key from protocol|host|port|user.
+// nodeHash computes a stable dedup key from protocol|host|port|user|security|encryption.
+// Includes Security/Encryption so nodes that differ only in those fields (kept
+// distinct by filter.Dedup) don't collide here or in scheduler/engine lookups.
 func nodeHash(n *model.Node) string {
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%d|%s", n.Protocol, n.Host, n.Port, n.User)))
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%d|%s|%s|%s", n.Protocol, n.Host, n.Port, n.User, n.Security, n.Encryption)))
 	return hex.EncodeToString(sum[:])
 }
 

@@ -711,9 +711,10 @@ func (s *Scheduler) Stop() {
 	}
 }
 
-// nodeHash replicates state.nodeHash (sha256 of protocol|host|port|user) so
-// the scheduler can key probe results and lookups without modifying state.
+// nodeHash replicates state.nodeHash (sha256 of
+// protocol|host|port|user|security|encryption) so the scheduler can key probe
+// results and lookups without modifying state. Keep in sync with internal/state.
 func nodeHash(n *model.Node) string {
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%d|%s", n.Protocol, n.Host, n.Port, n.User)))
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%d|%s|%s|%s", n.Protocol, n.Host, n.Port, n.User, n.Security, n.Encryption)))
 	return hex.EncodeToString(sum[:])
 }

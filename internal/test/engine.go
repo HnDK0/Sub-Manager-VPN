@@ -552,6 +552,6 @@ func (w *worker) kill() {
 // without modifying the (read-only) state package. Keep in sync with
 // internal/state/state.go.
 func nodeHash(n model.Node) string {
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%d|%s", n.Protocol, n.Host, n.Port, n.User)))
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%d|%s|%s|%s", n.Protocol, n.Host, n.Port, n.User, n.Security, n.Encryption)))
 	return hex.EncodeToString(sum[:])
 }
