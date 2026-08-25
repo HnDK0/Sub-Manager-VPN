@@ -5,8 +5,10 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
+  workflow_dispatch:
 
-# Allow the workflow to commit the built binary back into the repo (bin/).
+# Allow the workflow to publish a GitHub Release (binary built here, not
+# committed into the repo).
 permissions:
   contents: write
 
@@ -34,20 +36,12 @@ jobs:
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
             go build -trimpath -ldflags "-s -w" -o submanager-linux .
 
-      # On push, publish the binary into bin/ so users can install it with a
-      # one-line curl|bash — no manual GitHub Release needed. The [skip ci]
-      # marker in the commit message stops this push from re-triggering CI.
-      - name: Publish binary to bin/
+      # Publish the binary as a GitHub Release (tag "latest") so users install it
+      # with a one-line curl|bash — no binary committed into git history.
+      - name: Publish binary to GitHub Release
         if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          mkdir -p bin
-          mv submanager-linux bin/submanager-linux
-          git add bin/submanager-linux
-          if git commit -m "ci: update binary [skip ci]"; then
-            git pull --rebase --autostash
-            git push
-          else
-            echo "binary unchanged, nothing to publish"
-          fi
+          gh release create latest --title "latest" --latest submanager-linux 2>/dev/null \
+            || gh release upload latest submanager-linux --clobber

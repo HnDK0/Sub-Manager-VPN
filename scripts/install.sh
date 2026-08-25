@@ -12,8 +12,8 @@
 #   INTERVAL TOPN CORPSE INSTALL_DIR
 set -euo pipefail
 
-# GitHub slug "owner/repo" the prebuilt binary is published to (the bin/ folder
-# in the repo, updated automatically by CI). Override with REPO=/BRANCH= if needed.
+# GitHub slug "owner/repo" the prebuilt binary is published to as a GitHub
+# Release (tag "latest", built by CI). Override with REPO=/BRANCH= if needed.
 REPO="${REPO:-HnDK0/Sub-Manager-VPN}"
 BRANCH="${BRANCH:-main}"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
@@ -51,7 +51,7 @@ echo "== Sub Manager VPN installer =="
 # when REPO is empty (running inside a cloned repo).
 mkdir -p "$INSTALL_DIR"
 if [ -n "$REPO" ]; then
-  url="https://raw.githubusercontent.com/$REPO/$BRANCH/bin/submanager-linux"
+  url="https://github.com/$REPO/releases/download/latest/submanager-linux"
   echo "downloading $url"
   tmp="$BIN_PATH.tmp"
   if command -v curl >/dev/null 2>&1; then
