@@ -130,3 +130,38 @@ echo "Subscriptions base: http://$SERVE_ADDR/s/$SERVE_TOKEN/"
 echo "Config:            $CFG_PATH"
 echo
 echo "Open the admin UI in a browser and paste the web token to log in."
+
+# ── 5. nginx hint (print only, no writes) ───────────────────────────────
+if command -v nginx >/dev/null 2>&1; then
+  NGINX_CONF=$(nginx -t 2>&1 | grep -oE '/[^ ]+nginx\.conf' | head -n1 || true)
+  echo
+  echo "nginx detected:      yes"
+  [ -n "$NGINX_CONF" ] && echo "nginx config:        $NGINX_CONF"
+  echo "vhost include dir:   /etc/nginx/sites-enabled/   (or /etc/nginx/conf.d/)"
+  echo
+  echo "# admin UI (SSE — keep proxy_buffering off):"
+  cat <<EOF
+location /$WEB_SECRET/ {
+    proxy_pass http://$WEB_ADDR/$WEB_SECRET/;
+    proxy_http_version 1.1;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 1d;
+}
+EOF
+  echo "# subscriptions:"
+  cat <<EOF
+location /s/$SERVE_TOKEN/ {
+    proxy_pass http://$SERVE_ADDR/s/$SERVE_TOKEN/;
+    proxy_http_version 1.1;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+}
+EOF
+fi
