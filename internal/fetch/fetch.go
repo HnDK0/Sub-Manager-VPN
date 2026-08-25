@@ -324,8 +324,15 @@ func (f *Fetcher) assertSafeHost(rawURL string) error {
 	if err != nil {
 		return fmt.Errorf("fetch: invalid url %q: %w", rawURL, err)
 	}
-	ok, err := netutil.IsPublicHost(u.Hostname())
-	if err != nil || !ok {
+	// Reject only literal non-public IPs (private/loopback/link-local/metadata).
+	// Domains are allowed without DNS resolution: a live lookup here is both
+	// fragile (odd resolvers, mixed public/private answers) and useless against
+	// DNS rebinding — the connect-time resolution happens immediately after.
+	isLiteral, public, err := netutil.IsPublicLiteralIP(u.Hostname())
+	if err != nil {
+		return fmt.Errorf("fetch: refusing non-public host: %s", u.Hostname())
+	}
+	if isLiteral && !public {
 		return fmt.Errorf("fetch: refusing non-public host: %s", u.Hostname())
 	}
 	return nil
