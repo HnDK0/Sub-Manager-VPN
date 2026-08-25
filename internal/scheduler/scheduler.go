@@ -15,6 +15,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -58,6 +59,9 @@ type Config struct {
 	MinSpeedMbps int
 	// SpeedTestTopN caps how many MB are downloaded for the speed sample.
 	SpeedTestTopN int
+	// ExcludeCountries holds 2-letter ISO codes whose nodes are dropped from
+	// selection (e.g. a user in RU typically does not want RU exit nodes).
+	ExcludeCountries []string
 	// IsBanned reports whether a node hash is banned and must be excluded from
 	// selection (so it never reaches a subscription). Nil disables banning.
 	IsBanned func(hash string) bool
@@ -641,6 +645,15 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 	// Build candidates from alive nodes only. Banned nodes are dropped here so
 	// they can never reach a generated subscription. The min-speed brake drops
 	// nodes whose measured throughput is below the configured floor.
+	// Drop nodes whose resolved country is in the exclude list so they can
+	// never reach a generated subscription.
+	exclude := make(map[string]bool, len(s.cfg.ExcludeCountries))
+	for _, c := range s.cfg.ExcludeCountries {
+		if c = strings.ToUpper(strings.TrimSpace(c)); c != "" {
+			exclude[c] = true
+		}
+	}
+
 	var cands []selector.Candidate
 	floorKbps := s.cfg.MinSpeedMbps * 1000
 	for _, en := range enrichedNodes {
@@ -649,6 +662,9 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 			continue
 		}
 		if s.cfg.IsBanned != nil && s.cfg.IsBanned(en.hash) {
+			continue
+		}
+		if exclude[strings.ToUpper(en.country)] {
 			continue
 		}
 		if floorKbps > 0 && r.SpeedKbps < int64(floorKbps) {

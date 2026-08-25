@@ -23,26 +23,27 @@ import (
 
 // Config holds the runtime knobs parsed from CLI flags.
 type Config struct {
-	StatePath   string
-	SourcesPath string // plain-text sources whitelist (separate from state DB)
-	AssetsDir   string
-	OutDir      string
-	CoresDir    string
-	Interval    time.Duration
-	TopN        int
-	DegradeMs   int
-	MinKeep     int
-	SeedFile    string // optional: newline-separated source URLs to seed (replace list) then exit
-	ServeAddr   string // subscription HTTP server listen addr (loopback); empty disables
-	ServeToken  string // secret token for /s/<token>/ hidden path; empty = direct /<file>
-	WebAddr     string // web management UI listen addr
-	WebToken    string // required token for the web management UI
-	WebSecret    string // secret path prefix (>=24 chars) hiding the admin UI
-	CorpseCycles int   // corpse-skip cycles; 0 disables
-	ProbeURL     string // HTTP GET target for real RTT (empty -> engine default)
-	SpeedTestURL string // HTTP download target for throughput (empty disables)
-	MinSpeedMbps int    // throughput floor for the speed brake (0 disables)
-	SpeedTestTopN int   // MB cap for the speed sample download
+	StatePath        string
+	SourcesPath      string // plain-text sources whitelist (separate from state DB)
+	AssetsDir        string
+	OutDir           string
+	CoresDir         string
+	Interval         time.Duration
+	TopN             int
+	DegradeMs        int
+	MinKeep          int
+	SeedFile         string   // optional: newline-separated source URLs to seed (replace list) then exit
+	ServeAddr        string   // subscription HTTP server listen addr (loopback); empty disables
+	ServeToken       string   // secret token for /s/<token>/ hidden path; empty = direct /<file>
+	WebAddr          string   // web management UI listen addr
+	WebToken         string   // required token for the web management UI
+	WebSecret        string   // secret path prefix (>=24 chars) hiding the admin UI
+	CorpseCycles     int      // corpse-skip cycles; 0 disables
+	ProbeURL         string   // HTTP GET target for real RTT (empty -> engine default)
+	SpeedTestURL     string   // HTTP download target for throughput (empty disables)
+	MinSpeedMbps     int      // throughput floor for the speed brake (0 disables)
+	SpeedTestTopN    int      // MB cap for the speed sample download
+	ExcludeCountries []string // ISO codes excluded from subscriptions (e.g. ru,cn)
 }
 
 // main parses flags, builds the Config, and delegates all wiring to run so it
@@ -67,25 +68,26 @@ func main() {
 	// Persist the effective config so config.json stays in sync with the last
 	// run (CLI flags override file values; this records the resolved result).
 	eff := settings.Settings{
-		StatePath:    cfg.StatePath,
-		SourcesPath:  cfg.SourcesPath,
-		AssetsDir:    cfg.AssetsDir,
-		OutDir:       cfg.OutDir,
-		CoresDir:     cfg.CoresDir,
-		Interval:     cfg.Interval.String(),
-		TopN:         cfg.TopN,
-		DegradeMs:    cfg.DegradeMs,
-		MinKeep:      cfg.MinKeep,
-		ServeAddr:    cfg.ServeAddr,
-		ServeToken:   cfg.ServeToken,
-		WebAddr:      cfg.WebAddr,
-		WebToken:     cfg.WebToken,
-		WebSecret:    cfg.WebSecret,
-		CorpseCycles: cfg.CorpseCycles,
-		ProbeURL:     cfg.ProbeURL,
-		SpeedTestURL: cfg.SpeedTestURL,
-		MinSpeedMbps: cfg.MinSpeedMbps,
-		SpeedTestTopN: cfg.SpeedTestTopN,
+		StatePath:        cfg.StatePath,
+		SourcesPath:      cfg.SourcesPath,
+		AssetsDir:        cfg.AssetsDir,
+		OutDir:           cfg.OutDir,
+		CoresDir:         cfg.CoresDir,
+		Interval:         cfg.Interval.String(),
+		TopN:             cfg.TopN,
+		DegradeMs:        cfg.DegradeMs,
+		MinKeep:          cfg.MinKeep,
+		ServeAddr:        cfg.ServeAddr,
+		ServeToken:       cfg.ServeToken,
+		WebAddr:          cfg.WebAddr,
+		WebToken:         cfg.WebToken,
+		WebSecret:        cfg.WebSecret,
+		CorpseCycles:     cfg.CorpseCycles,
+		ProbeURL:         cfg.ProbeURL,
+		SpeedTestURL:     cfg.SpeedTestURL,
+		MinSpeedMbps:     cfg.MinSpeedMbps,
+		SpeedTestTopN:    cfg.SpeedTestTopN,
+		ExcludeCountries: cfg.ExcludeCountries,
 	}
 	if err := settings.Save(configPath, eff); err != nil {
 		log.Printf("config: save %s: %v", configPath, err)
@@ -146,9 +148,17 @@ func parseFlags() (Config, string) {
 	speedTestURL := flag.String("speed-test-url", dfltStr(existed, loaded.SpeedTestURL, ""), "HTTP download target for throughput (empty disables speed measurement)")
 	minSpeedMbps := flag.Int("min-speed-mbps", dfltInt(existed, loaded.MinSpeedMbps, 0), "throughput floor (Mbps) for the speed brake; 0 disables")
 	speedTestTopN := flag.Int("speed-test-topn", dfltInt(existed, loaded.SpeedTestTopN, 5), "MB cap for the speed sample download")
+	excludeCountries := flag.String("exclude-countries", strings.Join(loaded.ExcludeCountries, ","), "comma-separated ISO country codes to exclude from subscriptions (e.g. ru,cn)")
 	// Re-register -config on the main set so flag.Parse accepts it (value already resolved).
 	flag.String("config", configPath, "persisted runtime config (config.json); CLI flags override file values")
 	flag.Parse()
+
+	var excl []string
+	for _, p := range strings.Split(*excludeCountries, ",") {
+		if p = strings.TrimSpace(strings.ToUpper(p)); p != "" {
+			excl = append(excl, p)
+		}
+	}
 
 	n := *topn
 	if n < 3 {
@@ -159,26 +169,27 @@ func parseFlags() (Config, string) {
 	}
 
 	return Config{
-		StatePath:   *statePath,
-		SourcesPath: *sourcesPath,
-		AssetsDir:   *assetsDir,
-		OutDir:      *outDir,
-		CoresDir:    *coresDir,
-		Interval:    *interval,
-		TopN:        n,
-		DegradeMs:   *degrade,
-		MinKeep:     *minkeep,
-		SeedFile:    *seed,
-		ServeAddr:   *serveAddr,
-		ServeToken:  *serveToken,
-		WebAddr:     *webAddr,
-		WebToken:    *webToken,
-		WebSecret:   *webSecret,
-		CorpseCycles: *corpseCycles,
-		ProbeURL:     *probeURL,
-		SpeedTestURL: *speedTestURL,
-		MinSpeedMbps: *minSpeedMbps,
-		SpeedTestTopN: *speedTestTopN,
+		StatePath:        *statePath,
+		SourcesPath:      *sourcesPath,
+		AssetsDir:        *assetsDir,
+		OutDir:           *outDir,
+		CoresDir:         *coresDir,
+		Interval:         *interval,
+		TopN:             n,
+		DegradeMs:        *degrade,
+		MinKeep:          *minkeep,
+		SeedFile:         *seed,
+		ServeAddr:        *serveAddr,
+		ServeToken:       *serveToken,
+		WebAddr:          *webAddr,
+		WebToken:         *webToken,
+		WebSecret:        *webSecret,
+		CorpseCycles:     *corpseCycles,
+		ProbeURL:         *probeURL,
+		SpeedTestURL:     *speedTestURL,
+		MinSpeedMbps:     *minSpeedMbps,
+		SpeedTestTopN:    *speedTestTopN,
+		ExcludeCountries: excl,
 	}, configPath
 }
 
@@ -286,21 +297,21 @@ func runInner(ctx context.Context, cfg Config, sch *scheduler.Scheduler, skipUI 
 	// 3. Build scheduler config and scheduler (if not injected).
 	bansStore := bans.New(filepath.Join(filepath.Dir(configPath), "bans.json"))
 	schedCfg := scheduler.Config{
-		StatePath:   cfg.StatePath,
-		SourcesPath: cfg.SourcesPath,
-		AssetsDir:   cfg.AssetsDir,
-		CoreDir:   cfg.CoresDir,
-		OutDir:      cfg.OutDir,
-		Interval:    cfg.Interval,
-		TopN:        cfg.TopN,
-		DegradeMs:   cfg.DegradeMs,
-		MinKeep:     cfg.MinKeep,
-		CorpseCycles: cfg.CorpseCycles,
-		ProbeURL:     cfg.ProbeURL,
-		SpeedTestURL: cfg.SpeedTestURL,
-		MinSpeedMbps: cfg.MinSpeedMbps,
+		StatePath:     cfg.StatePath,
+		SourcesPath:   cfg.SourcesPath,
+		AssetsDir:     cfg.AssetsDir,
+		CoreDir:       cfg.CoresDir,
+		OutDir:        cfg.OutDir,
+		Interval:      cfg.Interval,
+		TopN:          cfg.TopN,
+		DegradeMs:     cfg.DegradeMs,
+		MinKeep:       cfg.MinKeep,
+		CorpseCycles:  cfg.CorpseCycles,
+		ProbeURL:      cfg.ProbeURL,
+		SpeedTestURL:  cfg.SpeedTestURL,
+		MinSpeedMbps:  cfg.MinSpeedMbps,
 		SpeedTestTopN: cfg.SpeedTestTopN,
-		IsBanned:     bansStore.Has,
+		IsBanned:      bansStore.Has,
 	}
 	if sch == nil {
 		sch, err = scheduler.New(schedCfg)

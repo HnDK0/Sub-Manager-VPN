@@ -15,25 +15,26 @@ import (
 // Settings mirrors the runtime knobs persisted to config.json. JSON tags use
 // snake_case so the on-disk file stays human-readable.
 type Settings struct {
-	StatePath    string `json:"state_path"`
-	SourcesPath  string `json:"sources_path"`
-	AssetsDir    string `json:"assets_dir"`
-	OutDir       string `json:"out_dir"`
-	CoresDir     string `json:"cores_dir"`
-	Interval     string `json:"interval"` // e.g. "30m"
-	TopN         int    `json:"topn"`
-	DegradeMs    int    `json:"degrade_ms"`
-	MinKeep      int    `json:"minkeep"`
-	ServeAddr    string `json:"serve_addr"`
-	ServeToken   string `json:"serve_token"`
-	WebAddr      string `json:"web_addr"`
-	WebToken     string `json:"web_token"`
-	WebSecret    string `json:"web_secret"`
-	CorpseCycles int    `json:"corpse_cycles"`
-	ProbeURL     string `json:"probe_url"`
-	SpeedTestURL string `json:"speed_test_url"`
-	MinSpeedMbps int    `json:"min_speed_mbps"`
-	SpeedTestTopN int   `json:"speed_test_topn"`
+	StatePath        string   `json:"state_path"`
+	SourcesPath      string   `json:"sources_path"`
+	AssetsDir        string   `json:"assets_dir"`
+	OutDir           string   `json:"out_dir"`
+	CoresDir         string   `json:"cores_dir"`
+	Interval         string   `json:"interval"` // e.g. "30m"
+	TopN             int      `json:"topn"`
+	DegradeMs        int      `json:"degrade_ms"`
+	MinKeep          int      `json:"minkeep"`
+	ServeAddr        string   `json:"serve_addr"`
+	ServeToken       string   `json:"serve_token"`
+	WebAddr          string   `json:"web_addr"`
+	WebToken         string   `json:"web_token"`
+	WebSecret        string   `json:"web_secret"`
+	CorpseCycles     int      `json:"corpse_cycles"`
+	ProbeURL         string   `json:"probe_url"`
+	SpeedTestURL     string   `json:"speed_test_url"`
+	MinSpeedMbps     int      `json:"min_speed_mbps"`
+	SpeedTestTopN    int      `json:"speed_test_topn"`
+	ExcludeCountries []string `json:"exclude_countries"`
 }
 
 // Default returns the non-path defaults. Paths are left empty; the caller (main)

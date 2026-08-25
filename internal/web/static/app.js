@@ -646,6 +646,7 @@ const SETTINGS_FIELDS = [
   { key: "assets_dir", label: "Assets Dir", type: "text", note: "GeoIP mmdb directory", readonly: true },
   { key: "out_dir", label: "Output Dir", type: "text", note: "generated subscriptions directory", readonly: true },
   { key: "cores_dir", label: "Cores Dir", type: "text", note: "xray/sing-box binaries directory", readonly: true },
+  { key: "exclude_countries", label: "Exclude Countries", type: "text", note: "comma-separated ISO codes to exclude from subscriptions (e.g. ru,cn)" },
 ];
 
 async function loadSettings() {
@@ -658,7 +659,7 @@ async function loadSettings() {
     form.innerHTML = SETTINGS_FIELDS.map(f => `
       <div class="settings-field">
         <label for="sf-${f.key}">${esc(f.label)}</label>
-        <input id="sf-${f.key}" type="${f.type}" value="${esc(s[f.key] != null ? s[f.key] : '')}" ${f.readonly ? 'readonly' : ''} data-key="${esc(f.key)}" />
+        <input id="sf-${f.key}" type="${f.type}" value="${esc(Array.isArray(s[f.key]) ? s[f.key].join(', ') : (s[f.key] != null ? s[f.key] : ''))}" ${f.readonly ? 'readonly' : ''} data-key="${esc(f.key)}" />
         <span class="field-note">${esc(f.note)}</span>
       </div>`).join("") + `
       <div class="settings-actions">
@@ -696,6 +697,10 @@ async function saveSettings(current) {
     const el = $("sf-" + f.key);
     if (!el || el.readOnly) return;
     const val = el.value.trim();
+    if (f.key === "exclude_countries") {
+      patch[f.key] = val ? val.split(',').map(x => x.trim().toUpperCase()).filter(Boolean) : [];
+      return;
+    }
     if (f.type === "number") {
       patch[f.key] = val === "" ? current[f.key] : parseInt(val, 10);
     } else {

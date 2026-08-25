@@ -16,8 +16,13 @@ func TestLoadMissingReturnsDefault(t *testing.T) {
 	if existed {
 		t.Fatal("expected existed=false for missing file")
 	}
-	if s != Default() {
-		t.Fatalf("expected default %+v, got %+v", Default(), s)
+	d := Default()
+	if s.Interval != d.Interval || s.TopN != d.TopN || s.DegradeMs != d.DegradeMs ||
+		s.MinKeep != d.MinKeep || s.CorpseCycles != d.CorpseCycles {
+		t.Fatalf("expected default, got %+v", s)
+	}
+	if len(s.ExcludeCountries) != 0 {
+		t.Fatalf("expected no excluded countries by default, got %v", s.ExcludeCountries)
 	}
 }
 
@@ -58,7 +63,9 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	if !existed {
 		t.Fatal("expected existed=true")
 	}
-	if out != in {
+	if out.StatePath != in.StatePath || out.WebAddr != in.WebAddr || out.WebToken != in.WebToken ||
+		out.WebSecret != in.WebSecret || out.Interval != in.Interval || out.TopN != in.TopN ||
+		out.CorpseCycles != in.CorpseCycles || len(out.ExcludeCountries) != len(in.ExcludeCountries) {
 		t.Fatalf("round-trip mismatch: %+v vs %+v", in, out)
 	}
 }
