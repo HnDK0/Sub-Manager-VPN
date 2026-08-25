@@ -44,6 +44,7 @@ type Config struct {
 	MinSpeedMbps     int      // throughput floor for the speed brake (0 disables)
 	SpeedTestTopN    int      // MB cap for the speed sample download
 	ExcludeCountries []string // ISO codes excluded from subscriptions (e.g. ru,cn)
+	Workers          int      // probe worker-pool size (each owns one xray process); 0 = default 8
 }
 
 // main parses flags, builds the Config, and delegates all wiring to run so it
@@ -88,6 +89,7 @@ func main() {
 		MinSpeedMbps:     cfg.MinSpeedMbps,
 		SpeedTestTopN:    cfg.SpeedTestTopN,
 		ExcludeCountries: cfg.ExcludeCountries,
+		Workers:          cfg.Workers,
 	}
 	if err := settings.Save(configPath, eff); err != nil {
 		log.Printf("config: save %s: %v", configPath, err)
@@ -125,12 +127,12 @@ func parseFlags() (Config, string) {
 	assetsDir := flag.String("assets", firstNonEmpty(loaded.AssetsDir, filepath.Join(appDir, "assets")), "assets dir (geo db, etc.)")
 	outDir := flag.String("out", firstNonEmpty(loaded.OutDir, filepath.Join(appDir, "out")), "generated subscriptions dir")
 	coresDir := flag.String("cores", firstNonEmpty(loaded.CoresDir, filepath.Join(appDir, "cores")), "core binaries (xray/sing-box) dir")
-	intervalDef := 30 * time.Minute
+	intervalDef := 2 * time.Hour
 	if existed && loaded.Interval != "" {
 		if d, perr := time.ParseDuration(loaded.Interval); perr == nil {
 			intervalDef = d
 		} else {
-			log.Printf("config: bad interval %q: %v (using 30m)", loaded.Interval, perr)
+			log.Printf("config: bad interval %q: %v (using 2h)", loaded.Interval, perr)
 		}
 	}
 	interval := flag.Duration("interval", intervalDef, "refresh interval")
@@ -149,6 +151,7 @@ func parseFlags() (Config, string) {
 	minSpeedMbps := flag.Int("min-speed-mbps", dfltInt(existed, loaded.MinSpeedMbps, 0), "throughput floor (Mbps) for the speed brake; 0 disables")
 	speedTestTopN := flag.Int("speed-test-topn", dfltInt(existed, loaded.SpeedTestTopN, 5), "MB cap for the speed sample download")
 	excludeCountries := flag.String("exclude-countries", strings.Join(loaded.ExcludeCountries, ","), "comma-separated ISO country codes to exclude from subscriptions (e.g. ru,cn)")
+	workers := flag.Int("workers", dfltInt(existed, loaded.Workers, 8), "probe worker-pool size (each owns one xray process); lower = gentler on weak VPS/network (default 8)")
 	// Re-register -config on the main set so flag.Parse accepts it (value already resolved).
 	flag.String("config", configPath, "persisted runtime config (config.json); CLI flags override file values")
 	flag.Parse()
@@ -190,6 +193,7 @@ func parseFlags() (Config, string) {
 		MinSpeedMbps:     *minSpeedMbps,
 		SpeedTestTopN:    *speedTestTopN,
 		ExcludeCountries: excl,
+		Workers:          *workers,
 	}, configPath
 }
 
@@ -297,21 +301,23 @@ func runInner(ctx context.Context, cfg Config, sch *scheduler.Scheduler, skipUI 
 	// 3. Build scheduler config and scheduler (if not injected).
 	bansStore := bans.New(filepath.Join(filepath.Dir(configPath), "bans.json"))
 	schedCfg := scheduler.Config{
-		StatePath:     cfg.StatePath,
-		SourcesPath:   cfg.SourcesPath,
-		AssetsDir:     cfg.AssetsDir,
-		CoreDir:       cfg.CoresDir,
-		OutDir:        cfg.OutDir,
-		Interval:      cfg.Interval,
-		TopN:          cfg.TopN,
-		DegradeMs:     cfg.DegradeMs,
-		MinKeep:       cfg.MinKeep,
-		CorpseCycles:  cfg.CorpseCycles,
-		ProbeURL:      cfg.ProbeURL,
-		SpeedTestURL:  cfg.SpeedTestURL,
-		MinSpeedMbps:  cfg.MinSpeedMbps,
-		SpeedTestTopN: cfg.SpeedTestTopN,
-		IsBanned:      bansStore.Has,
+		StatePath:        cfg.StatePath,
+		SourcesPath:      cfg.SourcesPath,
+		AssetsDir:        cfg.AssetsDir,
+		CoreDir:          cfg.CoresDir,
+		OutDir:           cfg.OutDir,
+		Interval:         cfg.Interval,
+		TopN:             cfg.TopN,
+		DegradeMs:        cfg.DegradeMs,
+		MinKeep:          cfg.MinKeep,
+		CorpseCycles:     cfg.CorpseCycles,
+		ProbeURL:         cfg.ProbeURL,
+		SpeedTestURL:     cfg.SpeedTestURL,
+		MinSpeedMbps:     cfg.MinSpeedMbps,
+		SpeedTestTopN:    cfg.SpeedTestTopN,
+		ExcludeCountries: cfg.ExcludeCountries,
+		Workers:          cfg.Workers,
+		IsBanned:         bansStore.Has,
 	}
 	if sch == nil {
 		sch, err = scheduler.New(schedCfg)

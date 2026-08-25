@@ -647,6 +647,7 @@ const SETTINGS_FIELDS = [
   { key: "out_dir", label: "Output Dir", type: "text", note: "generated subscriptions directory", readonly: true },
   { key: "cores_dir", label: "Cores Dir", type: "text", note: "xray/sing-box binaries directory", readonly: true },
   { key: "exclude_countries", label: "Exclude Countries", type: "text", note: "comma-separated ISO codes to exclude from subscriptions (e.g. ru,cn)" },
+  { key: "workers", label: "Workers", type: "number", note: "probe worker-pool size (each owns one xray process); lower = gentler on weak VPS/network (default 8)" },
 ];
 
 async function loadSettings() {

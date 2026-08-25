@@ -20,7 +20,7 @@ type Settings struct {
 	AssetsDir        string   `json:"assets_dir"`
 	OutDir           string   `json:"out_dir"`
 	CoresDir         string   `json:"cores_dir"`
-	Interval         string   `json:"interval"` // e.g. "30m"
+	Interval         string   `json:"interval"` // e.g. "2h"
 	TopN             int      `json:"topn"`
 	DegradeMs        int      `json:"degrade_ms"`
 	MinKeep          int      `json:"minkeep"`
@@ -35,17 +35,19 @@ type Settings struct {
 	MinSpeedMbps     int      `json:"min_speed_mbps"`
 	SpeedTestTopN    int      `json:"speed_test_topn"`
 	ExcludeCountries []string `json:"exclude_countries"`
+	Workers          int      `json:"workers"`
 }
 
 // Default returns the non-path defaults. Paths are left empty; the caller (main)
 // fills them from the user config dir.
 func Default() Settings {
 	return Settings{
-		Interval:     "30m",
+		Interval:     "2h",
 		TopN:         5,
 		DegradeMs:    0,
 		MinKeep:      1,
 		CorpseCycles: 5,
+		Workers:      8,
 	}
 }
 

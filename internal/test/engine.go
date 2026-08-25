@@ -43,7 +43,7 @@ type Result struct {
 // Options configures an Engine.
 type Options struct {
 	// Workers is the size of the worker pool (each owns one xray process).
-	// Defaults to 24 when <= 0.
+	// Defaults to 8 when <= 0.
 	Workers int
 	// Probes is how many times each node is probed. Defaults to 3.
 	Probes int
@@ -148,7 +148,7 @@ type worker struct {
 // xray processes) is started immediately.
 func New(mgr *core.Manager, st *state.State, opts Options) *Engine {
 	if opts.Workers <= 0 {
-		opts.Workers = 24
+		opts.Workers = 8
 	}
 	if opts.Probes <= 0 {
 		opts.Probes = 3

@@ -62,6 +62,9 @@ type Config struct {
 	// ExcludeCountries holds 2-letter ISO codes whose nodes are dropped from
 	// selection (e.g. a user in RU typically does not want RU exit nodes).
 	ExcludeCountries []string
+	// Workers is the probe worker-pool size; each worker owns one xray process.
+	// 0 defaults to 8 (lower = gentler on weak VPS / constrained networks).
+	Workers int
 	// IsBanned reports whether a node hash is banned and must be excluded from
 	// selection (so it never reaches a subscription). Nil disables banning.
 	IsBanned func(hash string) bool
@@ -185,11 +188,11 @@ type Scheduler struct {
 }
 
 // New builds a Scheduler: it opens state, creates the core manager, the test
-// engine, the geo manager, and the output persister. Defaults: Interval 30m,
+// engine, the geo manager, and the output persister. Defaults: Interval 2h,
 // TopN 5, DegradeMs 0 (only the 2x-median rule is used when 0).
 func New(cfg Config) (*Scheduler, error) {
 	if cfg.Interval <= 0 {
-		cfg.Interval = 30 * time.Minute
+		cfg.Interval = 2 * time.Hour
 	}
 	if cfg.TopN <= 0 {
 		cfg.TopN = 5
@@ -199,6 +202,9 @@ func New(cfg Config) (*Scheduler, error) {
 	}
 	if cfg.CorpseCycles == 0 {
 		cfg.CorpseCycles = 5
+	}
+	if cfg.Workers <= 0 {
+		cfg.Workers = 8
 	}
 
 	st, err := state.Open(cfg.StatePath)
@@ -221,6 +227,7 @@ func New(cfg Config) (*Scheduler, error) {
 		SpeedTestURL:  cfg.SpeedTestURL,
 		MinSpeedMbps:  cfg.MinSpeedMbps,
 		SpeedTestTopN: cfg.SpeedTestTopN,
+		Workers:       cfg.Workers,
 	})
 
 	persister := selector.NewPersister(cfg.OutDir, cfg.MinKeep)
