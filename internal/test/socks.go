@@ -95,10 +95,14 @@ func (e *Engine) probeThrough(proxyAddr string, n model.Node, ctx context.Contex
 			}
 		}
 	}
-	if len(lats) > 0 {
+	// Require a majority of probes to actually tunnel through the node: a single
+	// lucky success out of 3 (flaky/dead backend, cached edge answer) must not
+	// mark a node alive. ponytail: one extra guard, no new knob.
+	required := (e.opts.Probes + 1) / 2
+	if len(lats) >= required {
 		r.LatencyMs = medianInt64(lats)
 	} else if e.realBackend {
-		// On the real path, liveness requires at least one HTTP probe
+		// On the real path, liveness requires a majority of HTTP probes
 		// tunneled THROUGH the node. The direct host TCP connect above only
 		// proves the port is open, not that VLESS/VMESS/Trojan actually
 		// tunnels — a dead server with an open port (CDN/firewall/anycast)

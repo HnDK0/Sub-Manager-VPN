@@ -148,13 +148,16 @@ type worker struct {
 // xray processes) is started immediately.
 func New(mgr *core.Manager, st *state.State, opts Options) *Engine {
 	if opts.Workers <= 0 {
-		opts.Workers = 8
+		opts.Workers = 4
 	}
 	if opts.Probes <= 0 {
 		opts.Probes = 3
 	}
 	if opts.Timeout <= 0 {
-		opts.Timeout = 5 * time.Second
+		// ponytail: a node slower than 2s to answer a tunneled probe is already
+		// a "shit server" per operator policy; fail it fast so dead/slow nodes
+		// stop tying up workers.
+		opts.Timeout = 2 * time.Second
 	}
 	if opts.Retention == (state.Retention{}) {
 		opts.Retention = state.DefaultRetention()

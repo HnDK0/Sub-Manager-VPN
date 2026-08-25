@@ -659,8 +659,8 @@ const SETTINGS_FIELDS = [
   { key: "assets_dir", label: "Assets Dir", type: "text", note: "GeoIP mmdb directory", readonly: true },
   { key: "out_dir", label: "Output Dir", type: "text", note: "generated subscriptions directory", readonly: true },
   { key: "cores_dir", label: "Cores Dir", type: "text", note: "xray/sing-box binaries directory", readonly: true },
-  { key: "exclude_countries", label: "Exclude Countries", type: "text", note: "comma-separated ISO codes to exclude from subscriptions (e.g. ru,cn)" },
-  { key: "workers", label: "Workers", type: "number", note: "probe worker-pool size (each owns one xray process); lower = gentler on weak VPS/network (default 8)" },
+  { key: "exclude_countries", label: "Exclude Countries", type: "countries", note: "comma-separated ISO codes to exclude from subscriptions (e.g. ru,cn)" },
+  { key: "workers", label: "Workers", type: "number", note: "probe worker-pool size (each owns one xray process); lower = gentler on weak VPS/network (default 4)" },
 ];
 
 async function loadSettings() {
@@ -670,12 +670,21 @@ async function loadSettings() {
     $("settings-note").textContent = d.note || "";
 
     const form = $("settings-form");
-    form.innerHTML = SETTINGS_FIELDS.map(f => `
+    form.innerHTML = SETTINGS_FIELDS.map(f => {
+      if (f.type === "countries") {
+        return `<div class="settings-field">
+          <label>${esc(f.label)}</label>
+          <div id="sf-${f.key}" class="countries-checks"></div>
+          <span class="field-note">${esc(f.note)}</span>
+        </div>`;
+      }
+      return `
       <div class="settings-field">
         <label for="sf-${f.key}">${esc(f.label)}</label>
         <input id="sf-${f.key}" type="${f.type}" value="${esc(Array.isArray(s[f.key]) ? s[f.key].join(', ') : (s[f.key] != null ? s[f.key] : ''))}" ${f.readonly ? 'readonly' : ''} data-key="${esc(f.key)}" />
         <span class="field-note">${esc(f.note)}</span>
-      </div>`).join("") + `
+      </div>`;
+    }).join("") + `
       <div class="settings-actions">
         <button type="submit" class="btn btn-accent">Save Settings</button>
       </div>
@@ -689,6 +698,20 @@ async function loadSettings() {
       e.preventDefault();
       await saveSettings(s);
     };
+
+    // populate exclude_countries checkboxes from /api/countries
+    const ccBox = $("sf-exclude_countries");
+    if (ccBox) {
+      try {
+        const cc = await api("/countries");
+        const excluded = new Set((s.exclude_countries || []).map(c => c.toUpperCase()));
+        ccBox.innerHTML = (cc.countries || []).map(c => {
+          const code = c.code.toUpperCase();
+          const id = "cc-" + code.toLowerCase();
+          return `<label><input type="checkbox" id="${id}" value="${code}" ${excluded.has(code) ? "checked" : ""}> ${esc(code)} (${c.count})</label>`;
+        }).join("");
+      } catch (e) { ccBox.textContent = "failed to load countries"; }
+    }
 
     const btnCleanup = $("btn-cleanup");
     if (btnCleanup) {
@@ -710,11 +733,11 @@ async function saveSettings(current) {
   SETTINGS_FIELDS.forEach(f => {
     const el = $("sf-" + f.key);
     if (!el || el.readOnly) return;
-    const val = el.value.trim();
-    if (f.key === "exclude_countries") {
-      patch[f.key] = val ? val.split(',').map(x => x.trim().toUpperCase()).filter(Boolean) : [];
+    if (f.type === "countries") {
+      patch[f.key] = [...el.querySelectorAll("input[type=checkbox]:checked")].map(cb => cb.value.toUpperCase());
       return;
     }
+    const val = el.value.trim();
     if (f.type === "number") {
       patch[f.key] = val === "" ? current[f.key] : parseInt(val, 10);
     } else {

@@ -47,7 +47,7 @@ func Default() Settings {
 		DegradeMs:    0,
 		MinKeep:      1,
 		CorpseCycles: 5,
-		Workers:      8,
+		Workers:      4,
 	}
 }
 

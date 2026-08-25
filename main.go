@@ -151,7 +151,7 @@ func parseFlags() (Config, string) {
 	minSpeedMbps := flag.Int("min-speed-mbps", dfltInt(existed, loaded.MinSpeedMbps, 0), "throughput floor (Mbps) for the speed brake; 0 disables")
 	speedTestTopN := flag.Int("speed-test-topn", dfltInt(existed, loaded.SpeedTestTopN, 5), "MB cap for the speed sample download")
 	excludeCountries := flag.String("exclude-countries", strings.Join(loaded.ExcludeCountries, ","), "comma-separated ISO country codes to exclude from subscriptions (e.g. ru,cn)")
-	workers := flag.Int("workers", dfltInt(existed, loaded.Workers, 8), "probe worker-pool size (each owns one xray process); lower = gentler on weak VPS/network (default 8)")
+	workers := flag.Int("workers", dfltInt(existed, loaded.Workers, 4), "probe worker-pool size (each owns one xray process); lower = gentler on weak VPS/network (default 4)")
 	// Re-register -config on the main set so flag.Parse accepts it (value already resolved).
 	flag.String("config", configPath, "persisted runtime config (config.json); CLI flags override file values")
 	flag.Parse()
