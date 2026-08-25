@@ -77,13 +77,33 @@ else
   exit 1
 fi
 
-# ── 2. Write config.json with randomized secrets ───────────────────────
+# ── 2. Resolve settings; printed values must match the running service ──
 mkdir -p "$CFG_DIR"
-[ -z "$WEB_TOKEN" ]   && WEB_TOKEN=$(gen_secret 32)
-[ -z "$WEB_SECRET" ]  && WEB_SECRET=$(gen_secret 32)
-[ -z "$SERVE_TOKEN" ] && SERVE_TOKEN=$(gen_secret 24)
 
-if [ -f "$CFG_PATH" ] && [ "${FORCE:-0}" != "1" ]; then
+CFG_EXISTS=0
+[ -f "$CFG_PATH" ] && CFG_EXISTS=1
+
+# Read a value from existing config.json (empty if absent).
+cfg_get() {
+  [ "$CFG_EXISTS" = "1" ] || { printf ''; return; }
+  grep -oE "\"$1\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$CFG_PATH" 2>/dev/null \
+    | sed -E "s/.*:[[:space:]]*\"([^\"]*)\"/\1/" | head -n1
+}
+
+# Secret: explicit env override > existing config > freshly generated.
+resolve_secret() {  # $1=envvar $2=json-key $3=length
+  local ev="${!1:-}" jv
+  if [ -n "$ev" ]; then printf '%s' "$ev"; return; fi
+  jv=$(cfg_get "$2")
+  if [ -n "$jv" ] && [ "${FORCE:-0}" != "1" ]; then printf '%s' "$jv"; return; fi
+  gen_secret "$3"
+}
+
+WEB_TOKEN=$(resolve_secret WEB_TOKEN web_token 32)
+WEB_SECRET=$(resolve_secret WEB_SECRET web_secret 32)
+SERVE_TOKEN=$(resolve_secret SERVE_TOKEN serve_token 24)
+
+if [ "$CFG_EXISTS" = "1" ] && [ "${FORCE:-0}" != "1" ]; then
   echo "config already at $CFG_PATH (FORCE=1 to regenerate secrets)"
 else
   cat > "$CFG_PATH" <<EOF
