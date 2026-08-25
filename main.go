@@ -118,11 +118,11 @@ func parseFlags() (Config, string) {
 		log.Printf("config: load %s: %v (using defaults)", configPath, lerr)
 	}
 
-	statePath := flag.String("state", dfltStr(existed, loaded.StatePath, filepath.Join(appDir, "state.db")), "state DB path")
-	sourcesPath := flag.String("sources", dfltStr(existed, loaded.SourcesPath, filepath.Join(appDir, "sources.txt")), "sources whitelist file (plain text)")
-	assetsDir := flag.String("assets", dfltStr(existed, loaded.AssetsDir, filepath.Join(appDir, "assets")), "assets dir (geo db, etc.)")
-	outDir := flag.String("out", dfltStr(existed, loaded.OutDir, filepath.Join(appDir, "out")), "generated subscriptions dir")
-	coresDir := flag.String("cores", dfltStr(existed, loaded.CoresDir, filepath.Join(appDir, "cores")), "core binaries (xray/sing-box) dir")
+	statePath := flag.String("state", firstNonEmpty(loaded.StatePath, filepath.Join(appDir, "state.db")), "state DB path")
+	sourcesPath := flag.String("sources", firstNonEmpty(loaded.SourcesPath, filepath.Join(appDir, "sources.txt")), "sources whitelist file (plain text)")
+	assetsDir := flag.String("assets", firstNonEmpty(loaded.AssetsDir, filepath.Join(appDir, "assets")), "assets dir (geo db, etc.)")
+	outDir := flag.String("out", firstNonEmpty(loaded.OutDir, filepath.Join(appDir, "out")), "generated subscriptions dir")
+	coresDir := flag.String("cores", firstNonEmpty(loaded.CoresDir, filepath.Join(appDir, "cores")), "core binaries (xray/sing-box) dir")
 	intervalDef := 30 * time.Minute
 	if existed && loaded.Interval != "" {
 		if d, perr := time.ParseDuration(loaded.Interval); perr == nil {
@@ -205,6 +205,18 @@ func extractConfigPath(args []string, def string) string {
 // dfltStr returns the file value when the file existed, else the hardcoded default.
 func dfltStr(existed bool, loaded, def string) string {
 	if existed {
+		return loaded
+	}
+	return def
+}
+
+// firstNonEmpty returns loaded when non-empty, otherwise def. Used for filesystem
+// path flags so a partial config.json (field absent or "") falls back to the
+// default user-config location instead of an empty string that breaks MkdirAll.
+// Unlike dfltStr it does NOT preserve an empty value, because there is no
+// "empty disables" semantics for paths — only serve_addr/web_addr need that.
+func firstNonEmpty(loaded, def string) string {
+	if loaded != "" {
 		return loaded
 	}
 	return def

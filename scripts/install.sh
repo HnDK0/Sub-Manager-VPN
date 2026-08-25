@@ -87,7 +87,12 @@ else
   "serve_token": "$SERVE_TOKEN",
   "interval": "$INTERVAL",
   "topn": $TOPN,
-  "corpse_cycles": $CORPSE
+  "corpse_cycles": $CORPSE,
+  "state_path": "$CFG_DIR/state.db",
+  "sources_path": "$CFG_DIR/sources.txt",
+  "assets_dir": "$CFG_DIR/assets",
+  "out_dir": "$CFG_DIR/out",
+  "cores_dir": "$CFG_DIR/cores"
 }
 EOF
   chmod 600 "$CFG_PATH"

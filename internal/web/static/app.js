@@ -663,12 +663,30 @@ async function loadSettings() {
       </div>`).join("") + `
       <div class="settings-actions">
         <button type="submit" class="btn btn-accent">Save Settings</button>
+      </div>
+      <div class="settings-field db-cleanup">
+        <span class="field-note">Prune old probe results/history and remove stale nodes from the database on demand.</span>
+        <button type="button" class="btn btn-danger" id="btn-cleanup">Clear old DB records</button>
+        <span id="cleanup-result" class="field-note"></span>
       </div>`;
 
     form.onsubmit = async (e) => {
       e.preventDefault();
       await saveSettings(s);
     };
+
+    const btnCleanup = $("btn-cleanup");
+    if (btnCleanup) {
+      btnCleanup.onclick = async () => {
+        if (!confirm("Clear old DB records? This prunes probe history/results and removes stale nodes.")) return;
+        try {
+          const r = await api("/admin/cleanup", { method: "POST" });
+          $("cleanup-result").textContent =
+            `done: removed ${r.removed} node(s), ${r.orphans} orphan(s) (${r.nodesBefore} → ${r.nodesAfter})`;
+          toast("database cleaned");
+        } catch (e) { toast(e.message); }
+      };
+    }
   } catch (e) { toast(e.message); }
 }
 
