@@ -46,6 +46,61 @@ func TestDetectHTTPDNoPanic(t *testing.T) {
 	_ = c.DetectHTTPD()
 }
 
+func TestParseNginxServersIn(t *testing.T) {
+	src := `
+http {
+    server {
+        server_name example.com www.example.com;
+        location /s/tok/ {
+            proxy_pass http://127.0.0.1:18080/s/tok/;
+        }
+        location = /healthz { proxy_pass http://127.0.0.1:18080/healthz; }
+    }
+    server {
+        server_name _;
+        listen 80 default_server;
+        location /admin/ {
+            proxy_pass http://127.0.0.1:8090/admin/;
+        }
+    }
+}
+`
+	servers := parseNginxServersIn(src)
+	if len(servers) != 2 {
+		t.Fatalf("got %d servers, want 2", len(servers))
+	}
+	var sub, admin *NginxServer
+	for i := range servers {
+		if len(servers[i].Names) > 0 && servers[i].Names[0] == "example.com" {
+			sub = &servers[i]
+		}
+		if len(servers[i].Names) == 0 {
+			admin = &servers[i]
+		}
+	}
+	if sub == nil {
+		t.Fatalf("subscription server not found")
+	}
+	if got := sub.LocProxy["/s/tok/"]; got != "127.0.0.1:18080" {
+		t.Fatalf("sub proxy target = %q, want 127.0.0.1:18080", got)
+	}
+	if got := sub.LocProxy["/healthz"]; got != "127.0.0.1:18080" {
+		t.Fatalf("healthz proxy target = %q, want 127.0.0.1:18080", got)
+	}
+	if admin == nil {
+		t.Fatalf("admin server (no names) not found")
+	}
+	if got := admin.LocProxy["/admin/"]; got != "127.0.0.1:8090" {
+		t.Fatalf("admin proxy target = %q, want 127.0.0.1:8090", got)
+	}
+}
+
+func TestParseNginxServersNoPanic(t *testing.T) {
+	c := NewController(t.TempDir(), "127.0.0.1:18080", "")
+	// On non-Linux (no /etc/nginx) this returns nil; must not panic.
+	_ = c.ParseNginxServers()
+}
+
 func TestServeHealthz(t *testing.T) {
 	dir := t.TempDir()
 	c := NewController(dir, "127.0.0.1:18099", "")

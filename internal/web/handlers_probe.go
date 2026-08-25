@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 
 	"vpn-sub-manager/internal/model"
 	"vpn-sub-manager/internal/netutil"
@@ -131,9 +132,49 @@ func (s *Server) handleGenerate(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	st := s.pub.Status()
 	names := s.pub.ListFiles()
+	serveAddr := st.ListenAddr // e.g. 127.0.0.1:18080
+	adminAddr := s.cfg.Addr    // e.g. 127.0.0.1:8090
+
+	// Derive public subscription/admin URLs from the installed nginx config.
+	publicByFile := make(map[string]string)
+	var publicAdmin string
+	for _, srv := range s.pub.ParseNginxServers() {
+		var name string
+		for _, nm := range srv.Names {
+			if nm == "*" || nm == "_" {
+				continue
+			}
+			name = nm
+			break
+		}
+		if name == "" {
+			continue
+		}
+		for locPath, target := range srv.LocProxy {
+			if target == serveAddr {
+				base := "https://" + name + ensureTrailingSlash(locPath)
+				for _, fn := range names {
+					if publicByFile[fn] == "" {
+						publicByFile[fn] = base + fn
+					}
+				}
+			} else if target == adminAddr {
+				if publicAdmin == "" {
+					publicAdmin = "https://" + name + ensureTrailingSlash(locPath)
+				}
+			}
+		}
+	}
+
 	urls := make([]map[string]any, 0, len(names))
 	for _, name := range names {
-		urls = append(urls, map[string]any{"name": name, "url": st.LocalURL + name})
+		entry := map[string]any{"name": name, "url": st.LocalURL + name}
+		if pub, ok := publicByFile[name]; ok && pub != "" {
+			entry["public"] = pub
+		} else {
+			entry["public"] = ""
+		}
+		urls = append(urls, entry)
 	}
 	subSnippet := s.pub.NginxSnippet(st.LocalURL, "/s/"+st.Token+"/")
 	adminTarget := "http://" + s.cfg.Addr
@@ -150,7 +191,19 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		"nginxSnippet":      subSnippet,
 		"adminNginxSnippet": adminSnippet,
 		"httpds":            s.pub.DetectHTTPD(),
+		"publicAdmin":       publicAdmin,
 	})
+}
+
+// ensureTrailingSlash guarantees a path ends with "/".
+func ensureTrailingSlash(p string) string {
+	if p == "" {
+		return "/"
+	}
+	if !strings.HasSuffix(p, "/") {
+		return p + "/"
+	}
+	return p
 }
 
 // settingsRestartNote documents that most params apply only after a restart.

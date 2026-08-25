@@ -613,14 +613,22 @@ async function loadPublish() {
     const files = d.files || [];
     $("sub-pub-urls").innerHTML = files.length
       ? '<h3 style="margin-top:12px;margin-bottom:6px;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em">Files</h3><ul style="list-style:none;padding:0">' +
-        files.map(f => `<li style="padding:4px 0"><a href="${esc(f.url)}" target="_blank">${esc(f.name)}</a></li>`).join("") + "</ul>"
+        files.map(f => {
+          const primary = f.public || f.url;
+          const fallback = f.public ? ` <span style="color:var(--muted);font-size:11px">(${esc(f.url)})</span>` : "";
+          return `<li style="padding:4px 0"><a href="${esc(primary)}" target="_blank">${esc(f.name)}</a>${fallback}</li>`;
+        }).join("") + "</ul>"
       : "";
     $("sub-pub-nginx").innerHTML = d.nginxSnippet
       ? `<h3 style="margin-top:12px;margin-bottom:6px;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em">nginx snippet · подписки</h3><pre class="log-box" style="max-height:120px">${esc(d.nginxSnippet)}</pre>`
       : "";
-    $("sub-pub-nginx-admin").innerHTML = d.adminNginxSnippet
-      ? `<h3 style="margin-top:12px;margin-bottom:6px;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em">nginx snippet · админка (SSE)</h3><pre class="log-box" style="max-height:160px">${esc(d.adminNginxSnippet)}</pre>`
-      : "";
+    $("sub-pub-nginx-admin").innerHTML =
+      (d.adminNginxSnippet
+        ? `<h3 style="margin-top:12px;margin-bottom:6px;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em">nginx snippet · админка (SSE)</h3><pre class="log-box" style="max-height:160px">${esc(d.adminNginxSnippet)}</pre>`
+        : "") +
+      (d.publicAdmin
+        ? `<div style="margin-top:8px"><span style="color:var(--muted);font-size:12px">Public admin URL: </span><a href="${esc(d.publicAdmin)}" target="_blank">${esc(d.publicAdmin)}</a></div>`
+        : "");
     $("sub-pub-httpd").innerHTML = (d.httpds || []).length
       ? `<h3 style="margin-top:12px;margin-bottom:6px;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:0.04em">Detected HTTP servers</h3><ul style="list-style:none;padding:0">${(d.httpds || []).map(h =>
           `<li style="padding:4px 0">${esc(h.name)} — ${esc(h.binPath || '?')} ${h.running ? '<span class="chip chip-ok">running</span>' : ''}</li>`
