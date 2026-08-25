@@ -1,0 +1,24 @@
+# Build artifacts (the linux binary is built by CI / install.sh, never committed)
+submanager-linux
+sub-manager
+vpn-sub-manager
+*.exe
+# ...except the published copy CI commits to bin/ (used by the curl|bash install):
+!bin/submanager-linux
+
+# Downloaded assets (GeoIP mmdb etc., fetched at setup, not committed)
+assets/*.mmdb
+
+# Runtime state & generated data (contains secrets / local state — never commit)
+state.db
+*.db
+out/
+cores/
+bans.json
+config.json
+sources.txt
+
+# OS / editor noise
+.DS_Store
+.idea/
+.vscode/

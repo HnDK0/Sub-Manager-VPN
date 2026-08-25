@@ -1,0 +1,53 @@
+name: build
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+# Allow the workflow to commit the built binary back into the repo (bin/).
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          check-latest: true
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build static linux/amd64 binary
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -trimpath -ldflags "-s -w" -o submanager-linux .
+
+      # On push, publish the binary into bin/ so users can install it with a
+      # one-line curl|bash — no manual GitHub Release needed. The [skip ci]
+      # marker in the commit message stops this push from re-triggering CI.
+      - name: Publish binary to bin/
+        if: github.event_name == 'push'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          mkdir -p bin
+          mv submanager-linux bin/submanager-linux
+          git add bin/submanager-linux
+          if git commit -m "ci: update binary [skip ci]"; then
+            git pull --rebase --autostash
+            git push
+          else
+            echo "binary unchanged, nothing to publish"
+          fi

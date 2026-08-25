@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sub Manager VPN</title>
+  <link rel="stylesheet" href="static/style.css" />
+</head>
+<body>
+  <header id="topbar">
+    <div class="topbar-left">
+      <h1>Sub Manager VPN</h1>
+      <span id="conn-badge" class="conn-badge off">disconnected</span>
+    </div>
+    <div class="topbar-right">
+      <button id="btn-cycle" class="btn btn-accent btn-sm" title="Run cycle now">Run Cycle</button>
+      <button id="btn-token" class="btn btn-ghost btn-sm" title="Change token">Token</button>
+    </div>
+  </header>
+
+  <nav id="nav">
+    <button class="nav-btn active" data-tab="dashboard">Dashboard</button>
+    <button class="nav-btn" data-tab="sources">Sources</button>
+    <button class="nav-btn" data-tab="nodes">Nodes</button>
+    <button class="nav-btn" data-tab="subscriptions">Subscriptions</button>
+    <button class="nav-btn" data-tab="settings">Settings</button>
+  </nav>
+
+  <main id="content">
+    <!-- Dashboard -->
+    <section id="tab-dashboard" class="tab active">
+      <div class="kpi-row" id="kpi-row"></div>
+      <div class="dashboard-grid">
+        <div class="panel">
+          <h3>Scheduler</h3>
+          <div id="sched-info"></div>
+        </div>
+        <div class="panel">
+          <h3>Pipeline</h3>
+          <div id="pipeline-funnel" class="funnel"></div>
+        </div>
+      </div>
+      <div class="panel" style="margin-top:12px">
+        <h3>Log</h3>
+        <pre id="live-log" class="log-box"></pre>
+      </div>
+      <div class="panel" style="margin-top:12px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <h3 style="margin-bottom:0">Subscription Config</h3>
+          <button id="btn-show-config" class="btn btn-sm btn-accent">Show Config</button>
+        </div>
+        <p class="muted" style="font-size:12px;margin-top:4px">View and copy generated subscription config (sing-box, Clash, v2rayN).</p>
+      </div>
+    </section>
+
+    <!-- Sources -->
+    <section id="tab-sources" class="tab">
+      <div class="panel">
+        <h3>Add Source</h3>
+        <div class="input-row">
+          <input id="src-url" type="url" placeholder="https://github.com/user/repo" />
+          <button id="btn-src-add" class="btn btn-accent">Add</button>
+        </div>
+        <div class="input-row" style="margin-top:8px">
+          <button id="btn-src-toggle-bulk" class="btn btn-ghost btn-sm">Bulk add</button>
+        </div>
+        <div id="src-bulk-area" class="hidden">
+          <textarea id="src-text" rows="4" placeholder="https://a.example/sub&#10;# https://b.example/sub (disabled)"></textarea>
+          <button id="btn-src-bulk" class="btn btn-accent btn-sm" style="margin-top:6px">Add all</button>
+        </div>
+        <div id="src-error" class="error-msg hidden"></div>
+      </div>
+      <div class="panel" style="margin-top:12px">
+        <h3>Sources <span id="src-count" class="badge"></span></h3>
+        <table id="src-table">
+          <thead><tr><th>URL</th><th>Type</th><th>Status</th><th>Actions</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div id="src-empty" class="empty hidden">No sources added yet.</div>
+      </div>
+    </section>
+
+    <!-- Nodes -->
+    <section id="tab-nodes" class="tab">
+      <div class="panel">
+        <div class="filter-bar">
+          <div class="dropdown-multi" id="node-country-wrap">
+            <button class="btn btn-sm btn-ghost" id="node-country-btn">All countries ▾</button>
+            <div class="dropdown-multi-panel hidden" id="node-country-panel"></div>
+          </div>
+          <select id="node-protocol">
+            <option value="">All protocols</option>
+            <option value="vless">VLESS</option>
+            <option value="vmess">VMess</option>
+            <option value="trojan">Trojan</option>
+            <option value="hysteria2">Hysteria2</option>
+            <option value="tuic">TUIC</option>
+          </select>
+          <input id="node-max-latency" type="number" placeholder="Max latency (ms)" min="0" style="width:140px" />
+          <select id="node-status">
+            <option value="alive" selected>Alive</option>
+            <option value="all">All status</option>
+            <option value="dead">Dead</option>
+          </select>
+          <select id="node-sort">
+            <option value="">Sort by…</option>
+            <option value="latency">Latency</option>
+            <option value="country">Country</option>
+            <option value="protocol">Protocol</option>
+            <option value="name">Name</option>
+            <option value="alive">Status</option>
+          </select>
+          <select id="node-order">
+            <option value="asc">Asc</option>
+            <option value="desc">Desc</option>
+          </select>
+          <button id="btn-node-refresh" class="btn btn-ghost btn-sm">Refresh</button>
+          <button id="btn-node-test" class="btn btn-accent btn-sm">Test Selected</button>
+        </div>
+        <div id="node-count" class="muted" style="margin-bottom:8px"></div>
+        <table id="node-table">
+          <thead><tr><th><input type="checkbox" id="node-select-all" /></th><th>Name</th><th>Host:Port</th><th>Country</th><th>Protocol</th><th>Status</th><th>Latency</th><th>Speed</th><th>Actions</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div id="node-empty" class="empty hidden">No nodes found. Run a cycle first.</div>
+        <div id="node-pagination" class="pagination" style="margin-top:8px"></div>
+      </div>
+      <div class="panel" style="margin-top:12px">
+        <h3>Забаненные</h3>
+        <div id="banned-list"></div>
+      </div>
+    </section>
+
+    <!-- Subscriptions -->
+    <section id="tab-subscriptions" class="tab">
+      <div class="panel">
+        <h3>Generated Files</h3>
+        <div id="sub-gen-files"></div>
+        <div id="sub-gen-empty" class="empty hidden">No generated files yet.</div>
+      </div>
+      <div class="panel" style="margin-top:12px">
+        <h3>Publish Status</h3>
+<div id="sub-pub-status"></div>
+<div id="sub-pub-urls"></div>
+<div id="sub-pub-nginx"></div>
+<div id="sub-pub-nginx-admin"></div>
+<div id="sub-pub-httpd"></div>
+      </div>
+    </section>
+
+    <!-- Settings -->
+    <section id="tab-settings" class="tab">
+      <div class="panel">
+        <h3>Settings</h3>
+        <div class="settings-note" id="settings-note"></div>
+        <form id="settings-form" class="settings-grid"></form>
+      </div>
+    </section>
+  </main>
+
+  <!-- Config Modal -->
+  <div id="config-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>Subscription Config</h3>
+        <button id="config-modal-close" class="btn btn-ghost btn-sm">✕</button>
+      </div>
+      <div class="modal-tabs">
+        <button class="modal-tab active" data-format="singbox">sing-box</button>
+        <button class="modal-tab" data-format="clash">Clash</button>
+        <button class="modal-tab" data-format="v2rayn">v2rayN</button>
+      </div>
+      <pre id="config-modal-content" class="config-content"></pre>
+      <div class="modal-footer">
+        <button id="config-modal-copy" class="btn btn-accent btn-sm">Copy to clipboard</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast"></div>
+  <script src="static/app.js"></script>
+</body>
+</html>
