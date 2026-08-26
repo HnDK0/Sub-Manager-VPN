@@ -645,7 +645,7 @@ async function loadPublish() {
 // ── Settings ────────────────────────────────────────────────────────
 const SETTINGS_FIELDS = [
   { key: "interval", label: "Interval", type: "text", note: "e.g. 30m, 1h — scheduler cycle interval" },
-  { key: "topn", label: "Top N", type: "number", note: "best nodes per country (3–5)" },
+  { key: "topn", label: "Top N", type: "number", note: "best nodes per country (3–20)", max: 20 },
   { key: "degrade_ms", label: "Degrade Threshold (ms)", type: "number", note: "0 = median-based auto" },
   { key: "minkeep", label: "Min Keep", type: "number", note: "minimum subscription versions kept" },
   { key: "corpse_cycles", label: "Corpse Cycles", type: "number", note: "consecutive dead cycles before skipping (0 = disabled)" },
@@ -675,14 +675,14 @@ async function loadSettings() {
       if (f.type === "countries" || f.type === "protocols") {
         return `<div class="settings-field">
           <label>${esc(f.label)}</label>
-          <div id="sf-${f.key}" class="countries-checks"></div>
+          <div id="sf-${f.key}" class="chip-checks"></div>
           <span class="field-note">${esc(f.note)}</span>
         </div>`;
       }
       return `
       <div class="settings-field">
         <label for="sf-${f.key}">${esc(f.label)}</label>
-        <input id="sf-${f.key}" type="${f.type}" value="${esc(Array.isArray(s[f.key]) ? s[f.key].join(', ') : (s[f.key] != null ? s[f.key] : ''))}" ${f.readonly ? 'readonly' : ''} data-key="${esc(f.key)}" />
+        <input id="sf-${f.key}" type="${f.type}" value="${esc(Array.isArray(s[f.key]) ? s[f.key].join(', ') : (s[f.key] != null ? s[f.key] : ''))}" ${f.readonly ? 'readonly' : ''} ${f.max != null ? 'max="' + f.max + '"' : ''} data-key="${esc(f.key)}" />
         <span class="field-note">${esc(f.note)}</span>
       </div>`;
     }).join("") + `

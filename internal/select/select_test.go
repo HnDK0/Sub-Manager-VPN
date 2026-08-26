@@ -90,14 +90,14 @@ func TestSelectTopNPerCountry(t *testing.T) {
 
 func TestSelectClampsTopN(t *testing.T) {
 	var cands []Candidate
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 25; i++ {
 		cands = append(cands, Candidate{Node: model.Node{Host: "h", Port: i}, LatencyMs: i, Country: "X"})
 	}
 	if len(Select(cands, 2)) != 3 { // clamped up to 3
 		t.Error("topN=2 should clamp to 3")
 	}
-	if len(Select(cands, 99)) != 5 { // clamped down to 5
-		t.Error("topN=99 should clamp to 5")
+	if len(Select(cands, 99)) != 20 { // clamped down to 20
+		t.Error("topN=99 should clamp to 20")
 	}
 	if len(Select(cands, 0)) != 5 { // default 5
 		t.Error("topN=0 should default to 5")

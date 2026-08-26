@@ -138,7 +138,7 @@ func parseFlags() (Config, string) {
 		}
 	}
 	interval := flag.Duration("interval", intervalDef, "refresh interval")
-	topn := flag.Int("topn", dfltInt(existed, loaded.TopN, 5), "top-N nodes per country (clamped 3..5)")
+	topn := flag.Int("topn", dfltInt(existed, loaded.TopN, 5), "top-N nodes per country (clamped 3..20)")
 	degrade := flag.Int("degrade", dfltInt(existed, loaded.DegradeMs, 0), "degrade latency threshold (ms)")
 	minkeep := flag.Int("minkeep", dfltInt(existed, loaded.MinKeep, 1), "minimum kept subscription versions")
 	seed := flag.String("seed", "", "seed sources from a file (newline-separated https URLs); replaces list and exits")
