@@ -460,9 +460,14 @@ func (s *Scheduler) defaultProbe(ctx context.Context, nodes []model.Node) (map[s
 	// Honor -workers: bound concurrent probes through the engine. The embedded
 	// mihomo hub parallelizes URLTest, so this is the real concurrency knob.
 	workers := s.cfg.Workers
-	if workers <= 0 {
-		workers = 32
+	// Mirror engine.New's clamp: a stale persisted `workers` (e.g. the old
+	// default 4 written to config.json on first run) must not silently kneecap
+	// concurrency. Anything below 16 is treated as "use the 350 default";
+	// above 512 is capped to the RAM/network-safe ceiling.
+	if workers < 16 || workers > 512 {
+		workers = 350
 	}
+	log.Printf("scheduler: probe concurrency = %d (cfg.Workers=%d)", workers, s.cfg.Workers)
 	sem := make(chan struct{}, workers)
 	for _, n := range nodes {
 		wg.Add(1)
