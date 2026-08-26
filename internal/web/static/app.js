@@ -131,16 +131,28 @@ function renderStatus(d) {
     </div>` : '');
   const fetchBar = d.phase === 'fetch' ? prog('источники', d.sourceDone, d.sourceTotal) : '';
   const probeBar = d.phase === 'probe' ? prog('проверено', d.probeDone, d.probeTotal) : '';
+  const geoBar = d.phase === 'geo' ? prog('geo', d.nodesGeoDone, d.nodesGeoTotal) : '';
+  const liveStats = d.phase === 'probe' ? `<div class="muted" style="margin-top:2px">Valid: ${d.aliveCount != null ? d.aliveCount : 0}${d.probeDone != null && d.aliveCount != null ? ' · Dropped: ' + (d.probeDone - d.aliveCount) : ''}</div>` : '';
   $("sched-info").innerHTML = `
     <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
       <span class="chip ${d.running ? 'chip-ok' : 'chip-bad'}">${d.running ? 'running' : 'stopped'}</span>
       <span class="muted">phase: ${esc(d.phase || '?')}</span>
+      <button class="btn btn-sm btn-ghost btn-danger" id="btn-cycle-stop" ${d.running ? '' : 'disabled'} style="margin-left:auto">Stop Cycle</button>
     </div>
     ${fetchBar}
+    ${geoBar}
     ${probeBar}
+    ${liveStats}
     <div class="muted">last cycle: ${d.lastCycleDurMs ? (d.lastCycleDurMs / 1000).toFixed(1) + 's' : '—'}</div>
     ${d.lastError ? `<div style="color:var(--bad);margin-top:4px;font-size:12px">Error: ${esc(d.lastError)}</div>` : ''}
   `;
+  const stopBtn = $("btn-cycle-stop");
+  if (stopBtn) stopBtn.onclick = async () => {
+    try {
+      await api("/cycle/stop", { method: "POST" });
+      toast("cycle stopped");
+    } catch (e) { toast(e.message); }
+  };
 }
 
 function renderPipeline(snap) {
@@ -645,7 +657,7 @@ async function loadPublish() {
 // ── Settings ────────────────────────────────────────────────────────
 const SETTINGS_FIELDS = [
   { key: "interval", label: "Interval", type: "text", note: "e.g. 30m, 1h — scheduler cycle interval" },
-  { key: "topn", label: "Top N", type: "number", note: "best nodes per country (3–20)", max: 20 },
+  { key: "topn", label: "Top N", type: "number", note: "best nodes per country (3–500)", max: 500 },
   { key: "degrade_ms", label: "Degrade Threshold (ms)", type: "number", note: "0 = median-based auto" },
   { key: "minkeep", label: "Min Keep", type: "number", note: "minimum subscription versions kept" },
   { key: "corpse_cycles", label: "Corpse Cycles", type: "number", note: "consecutive dead cycles before skipping (0 = disabled)" },

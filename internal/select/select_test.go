@@ -96,7 +96,7 @@ func TestSelectClampsTopN(t *testing.T) {
 	if len(Select(cands, 2)) != 3 { // clamped up to 3
 		t.Error("topN=2 should clamp to 3")
 	}
-	if len(Select(cands, 99)) != 20 { // clamped down to 20
+	if len(Select(cands, 99)) != 25 { // cap 500 >> count, all 25 returned
 		t.Error("topN=99 should clamp to 20")
 	}
 	if len(Select(cands, 0)) != 5 { // default 5

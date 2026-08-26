@@ -31,7 +31,7 @@ type Candidate struct {
 // Select ranks alive nodes per country by latency and returns the top TopN
 // from each country merged together. A country with fewer than TopN alive
 // nodes contributes ALL of its nodes (never padded with dead ones). TopN is
-// clamped to the supported range [3,20]; a non-positive value defaults to 5.
+// clamped to the supported range [3,500]; a non-positive value defaults to 5.
 func Select(cands []Candidate, topN int) []model.Node {
 	if topN <= 0 {
 		topN = 5
@@ -39,8 +39,8 @@ func Select(cands []Candidate, topN int) []model.Node {
 	if topN < 3 {
 		topN = 3
 	}
-	if topN > 20 {
-		topN = 20
+	if topN > 500 {
+		topN = 500
 	}
 
 	byCountry := make(map[string][]Candidate)

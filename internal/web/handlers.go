@@ -95,7 +95,11 @@ func (s *Server) buildStatus() map[string]any {
 		"sourceDone":     snap.SourceDone,
 		"probeTotal":     snap.ProbeTotal,
 		"probeDone":      snap.ProbeDone,
+		"aliveCount":     snap.AliveCount,
+		"deadCount":      snap.DeadCount,
 		"nodesFetched":   snap.NodesFetched,
+		"nodesGeoTotal":  snap.NodesGeoTotal,
+		"nodesGeoDone":   snap.NodesGeoDone,
 		"nodesAlive":     snap.NodesAlive,
 		"lastCycleDurMs": snap.LastCycleDur.Milliseconds(),
 		"lastError":      snap.LastError,
@@ -611,6 +615,15 @@ func (s *Server) handleCycle(w http.ResponseWriter, r *http.Request) {
 	s.sch.RequestCycle()
 	w.WriteHeader(http.StatusAccepted)
 	writeJSON(w, map[string]any{"requested": true})
+}
+
+// handleStopCycle aborts the currently running cycle (if any) without shutting
+// down the process or the ticker. The scheduler's cycleCtx is cancelled so the
+// in-flight cycle returns early; the next ticker tick starts a fresh one.
+func (s *Server) handleStopCycle(w http.ResponseWriter, r *http.Request) {
+	s.sch.StopCycle()
+	w.WriteHeader(http.StatusAccepted)
+	writeJSON(w, map[string]any{"stopped": true})
 }
 
 // handleNodeConfig serves a single node's raw v2rayN URI so the user can copy

@@ -133,6 +133,7 @@ func (s *Server) Start(ctx context.Context) error {
 	s.mux.HandleFunc("GET "+p+"/api/nodes/", s.auth(s.handleNodeConfig))
 	s.mux.HandleFunc("GET "+p+"/api/countries", s.auth(s.handleCountries))
 	s.mux.HandleFunc("POST "+p+"/api/cycle", s.auth(s.handleCycle))
+	s.mux.HandleFunc("POST "+p+"/api/cycle/stop", s.auth(s.handleStopCycle))
 	s.mux.HandleFunc("POST "+p+"/api/nodes/test", s.auth(s.handleTestNodes))
 	s.mux.HandleFunc("GET "+p+"/api/nodes/banned", s.auth(s.handleBanned))
 	s.mux.HandleFunc("POST "+p+"/api/nodes/ban", s.auth(s.handleBan))

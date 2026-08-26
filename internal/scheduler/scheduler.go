@@ -143,6 +143,12 @@ type Snapshot struct {
 	// Probe-phase progress, populated during the probe stage.
 	ProbeTotal int // nodes scheduled for probing this cycle
 	ProbeDone  int // nodes whose probe has completed this cycle
+	AliveCount int // nodes whose probe returned alive this cycle
+	DeadCount  int // nodes whose probe returned dead this cycle
+
+	// Geo-phase progress, populated during the geo/upsert stage.
+	NodesGeoTotal int // nodes scheduled for geo resolution this cycle
+	NodesGeoDone  int // nodes whose geo resolution completed this cycle
 }
 
 // engineNew and geoNew are the production constructors, kept as package-level
@@ -174,6 +180,13 @@ type Scheduler struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	// cycleCtx is the context for the currently running cycle, separate from
+	// the shutdown context (s.ctx). StopCycle cancels it to abort the running
+	// cycle without tearing down the process or the ticker.
+	cycleMu     sync.Mutex
+	cycleCtx    context.Context
+	cycleCancel context.CancelFunc
 
 	ticker  *time.Ticker
 	stopMu  sync.Mutex
@@ -427,7 +440,14 @@ func (s *Scheduler) defaultProbe(ctx context.Context, nodes []model.Node) (map[s
 			mu.Lock()
 			out[nodeHash(&n)] = r
 			mu.Unlock()
-			s.setStatus(func(st *Snapshot) { st.ProbeDone++ }) // ponytail: live probe progress for the UI
+			s.setStatus(func(st *Snapshot) {
+				st.ProbeDone++ // ponytail: live probe progress for the UI
+				if r.Alive {
+					st.AliveCount++
+				} else {
+					st.DeadCount++
+				}
+			})
 		}(n)
 	}
 	wg.Wait()
@@ -495,8 +515,19 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	s.engine.Start()
 	s.setStatus(func(st *Snapshot) { st.Running = true })
 
-	if err := s.Cycle(ctx); err != nil {
-		log.Printf("scheduler: initial cycle failed: %v", err)
+	// Skip the immediate startup cycle if a successful cycle completed recently
+	// (within the interval, or 1h if interval is zero). Avoids redundant work
+	// right after a restart.
+	grace := s.cfg.Interval
+	if grace <= 0 {
+		grace = time.Hour
+	}
+	if last, ok, err := s.st.LastSuccess(); err == nil && ok && time.Since(last) < grace {
+		log.Printf("scheduler: skipping immediate startup cycle (last successful %v ago, within %v)", time.Since(last), grace)
+	} else {
+		if err := s.Cycle(ctx); err != nil {
+			log.Printf("scheduler: initial cycle failed: %v", err)
+		}
 	}
 	for {
 		select {
@@ -541,9 +572,39 @@ func (s *Scheduler) RequestCycle() {
 	}
 }
 
+// StopCycle cancels the currently running cycle's context so the cycle function
+// returns early (it checks cycleCtx.Err() and bails cleanly). It does NOT shut
+// down the process or the ticker — only the in-flight cycle is aborted. Safe to
+// call when no cycle is running (it is a no-op then).
+func (s *Scheduler) StopCycle() {
+	s.cycleMu.Lock()
+	defer s.cycleMu.Unlock()
+	if s.cycleCancel != nil {
+		s.cycleCancel()
+	}
+}
+
 // Cycle runs the full pipeline once. It is safe to call directly (unit tests
-// do exactly that).
+// do exactly that). The cycle runs under a dedicated cycleCtx (a child of the
+// passed ctx) so it can be aborted independently via StopCycle without killing
+// the process or the ticker.
 func (s *Scheduler) Cycle(ctx context.Context) error {
+	// ponytail: derive a fresh, cancellable context per cycle so StopCycle can
+	// abort just this cycle. cycleCtx is a child of ctx, so cancelling it never
+	// cancels the shutdown context.
+	s.cycleMu.Lock()
+	s.cycleCtx, s.cycleCancel = context.WithCancel(ctx)
+	cctx := s.cycleCtx
+	s.cycleMu.Unlock()
+	defer func() {
+		s.cycleMu.Lock()
+		if s.cycleCancel != nil {
+			s.cycleCancel()
+			s.cycleCancel = nil
+		}
+		s.cycleMu.Unlock()
+	}()
+
 	cycle, err := s.st.IncrementCycle()
 	if err != nil {
 		return fmt.Errorf("scheduler: increment cycle: %w", err)
@@ -564,6 +625,10 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 		st.NodesFetched = 0
 		st.NodesUpserted = 0
 		st.NodesAlive = 0
+		st.AliveCount = 0
+		st.DeadCount = 0
+		st.NodesGeoTotal = 0
+		st.NodesGeoDone = 0
 		st.Parsed = 0
 		st.DedupKept = 0
 		st.DroppedUnsupported = 0
@@ -577,7 +642,7 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 
 	var nodes []model.Node
 	for _, src := range sources {
-		fetched, err := s.FetchFn(ctx, src)
+		fetched, err := s.FetchFn(cctx, src)
 		if err != nil {
 			// One bad source must not abort the whole cycle.
 			log.Printf("scheduler: fetch source %s failed: %v", src.URL, err)
@@ -595,29 +660,59 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 	nodes = s.filterCorpses(nodes)
 
 	// Geo-resolve + upsert each remaining node into state.
-	s.setStatus(func(st *Snapshot) { st.Phase = PhaseGeo })
+	s.setStatus(func(st *Snapshot) {
+		st.Phase = PhaseGeo
+		st.NodesGeoTotal = len(nodes)
+		st.NodesGeoDone = 0
+	})
 	type enriched struct {
 		n       model.Node
 		country string
 		hash    string
 	}
-	var enrichedNodes []enriched
-	upserted := 0
-	for _, n := range nodes {
-		country := s.GeoFn(n)
-		n.Country = country
-		hash := nodeHash(&n)
-		if err := s.st.UpsertNodeWithCountry(n, country); err != nil {
-			return fmt.Errorf("scheduler: upsert node: %w", err)
+	// ponytail: GeoFn (DNS + mmdb) is the slow part, so resolve countries in a
+	// bounded worker pool. SQLite allows only one writer, so the cheap upsert is
+	// done serially afterward — parallelism targets the geo lookup, not the DB.
+	countries := make([]string, len(nodes))
+	var geoWg sync.WaitGroup
+	sem := make(chan struct{}, 32)
+	var geoMu sync.Mutex
+	var geoErr error
+	for i := range nodes {
+		if cctx.Err() != nil {
+			break
 		}
-		enrichedNodes = append(enrichedNodes, enriched{n: n, country: country, hash: hash})
-		upserted++
-		if upserted%500 == 0 {
-			u := upserted
-			s.setStatus(func(st *Snapshot) { st.NodesUpserted = u })
-		}
+		geoWg.Add(1)
+		sem <- struct{}{}
+		go func(i int) {
+			defer geoWg.Done()
+			defer func() { <-sem }()
+			countries[i] = s.GeoFn(nodes[i])
+			s.setStatus(func(st *Snapshot) { st.NodesGeoDone++ })
+		}(i)
 	}
-	s.setStatus(func(st *Snapshot) { st.NodesUpserted = upserted })
+	geoWg.Wait()
+	if cctx.Err() != nil {
+		return cctx.Err() // ponytail: clean bail on cycle cancellation
+	}
+	var enrichedNodes []enriched
+	for i, n := range nodes {
+		n.Country = countries[i]
+		hash := nodeHash(&n)
+		if err := s.st.UpsertNodeWithCountry(n, countries[i]); err != nil {
+			geoMu.Lock()
+			if geoErr == nil {
+				geoErr = err
+			}
+			geoMu.Unlock()
+			break
+		}
+		enrichedNodes = append(enrichedNodes, enriched{n: n, country: countries[i], hash: hash})
+	}
+	if geoErr != nil {
+		return fmt.Errorf("scheduler: upsert node: %w", geoErr)
+	}
+	s.setStatus(func(st *Snapshot) { st.NodesUpserted = len(nodes) })
 
 	// Build skip sets for excluded countries/protocols so we don't waste probe
 	// budget on nodes that can never reach a subscription. Country is already
@@ -646,7 +741,7 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 		}
 		probeNodes = append(probeNodes, n)
 	}
-	results, err := s.ProbeFn(ctx, probeNodes)
+	results, err := s.ProbeFn(cctx, probeNodes)
 	if err != nil {
 		return fmt.Errorf("scheduler: probe: %w", err)
 	}
@@ -720,6 +815,9 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 
 	log.Printf("scheduler: cycle %d done: %d sources, %d nodes, %d selected",
 		cycle, len(sources), len(nodes), len(selected))
+	if err := s.st.SetLastSuccess(time.Now()); err != nil {
+		log.Printf("scheduler: record last success: %v", err)
+	}
 	s.setStatus(func(st *Snapshot) {
 		st.Phase = PhaseDone
 		st.LastCycleDur = time.Since(start)

@@ -516,6 +516,37 @@ func (s *State) IncrementCycle() (int, error) {
 	return cur, nil
 }
 
+// LastSuccess returns the timestamp of the last successful cycle, if one has
+// been recorded. The boolean is false when no successful cycle has run yet (or
+// on a fresh DB). An error is returned only for storage failures.
+func (s *State) LastSuccess() (time.Time, bool, error) {
+	var v string
+	err := s.db.QueryRow(`SELECT value FROM meta WHERE key = 'last_success'`).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("read last_success: %w", err)
+	}
+	ts, err := time.Parse(time.RFC3339, v)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("parse last_success: %w", err)
+	}
+	return ts, true, nil
+}
+
+// SetLastSuccess records the timestamp of a successful cycle so the scheduler
+// can skip a redundant immediate cycle on restart.
+func (s *State) SetLastSuccess(t time.Time) error {
+	if _, err := s.db.Exec(
+		`INSERT INTO meta(key, value) VALUES('last_success', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+		t.Format(time.RFC3339),
+	); err != nil {
+		return fmt.Errorf("write last_success: %w", err)
+	}
+	return nil
+}
+
 // Prune enforces the retention policy. It is safe to call with a zero-valued
 // Retention (nothing is pruned). sources is never touched.
 func (s *State) Prune(cfg Retention, currentCycle int) error {
