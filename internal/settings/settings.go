@@ -50,7 +50,7 @@ func Default() Settings {
 		DegradeMs:    0,
 		MinKeep:      1,
 		CorpseCycles: 5,
-		Workers:      4,
+		Workers:      32,
 		SubValidityInterval: "5m",
 		SubPingInterval:    "30m",
 	}

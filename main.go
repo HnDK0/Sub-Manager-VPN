@@ -173,7 +173,7 @@ func parseFlags() (Config, string) {
 	speedTestTopN := flag.Int("speed-test-topn", dfltInt(existed, loaded.SpeedTestTopN, 5), "MB cap for the speed sample download")
 	excludeCountries := flag.String("exclude-countries", strings.Join(loaded.ExcludeCountries, ","), "comma-separated ISO country codes to exclude from subscriptions (e.g. ru,cn)")
 	excludeProtocols := flag.String("exclude-protocols", strings.Join(loaded.ExcludeProtocols, ","), "comma-separated schemes to exclude from probing/subscriptions (e.g. vmess,trojan)")
-	workers := flag.Int("workers", dfltInt(existed, loaded.Workers, 4), "probe worker-pool size (in-process mihomo concurrency); lower = gentler on weak VPS/network (default 4)")
+	workers := flag.Int("workers", dfltInt(existed, loaded.Workers, 32), "probe worker-pool size (in-process mihomo concurrency); 16-32 recommended, default 32")
 	// Re-register -config on the main set so flag.Parse accepts it (value already resolved).
 	flag.String("config", configPath, "persisted runtime config (config.json); CLI flags override file values")
 	flag.Parse()

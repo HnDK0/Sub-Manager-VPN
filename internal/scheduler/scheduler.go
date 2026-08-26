@@ -240,7 +240,7 @@ func New(cfg Config) (*Scheduler, error) {
 	if cfg.CorpseCycles == 0 {
 		cfg.CorpseCycles = 5
 	}
-	if cfg.Workers <= 0 {
+	if cfg.Workers <= 0 || cfg.Workers < 16 {
 		cfg.Workers = 32
 	}
 	if cfg.SubValidityInterval <= 0 {

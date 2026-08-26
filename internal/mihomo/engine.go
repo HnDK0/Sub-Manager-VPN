@@ -44,7 +44,7 @@ type ProbeEngine interface {
 
 // New builds an embedded mihomo controller.
 func New(opts Options) *Controller {
-	if opts.Workers <= 0 {
+	if opts.Workers <= 0 || opts.Workers < 16 {
 		opts.Workers = 32
 	}
 	if opts.ProbeURL == "" {
