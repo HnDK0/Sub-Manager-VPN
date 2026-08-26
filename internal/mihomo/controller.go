@@ -263,7 +263,11 @@ func (c *Controller) Probe(ctx context.Context, n model.Node) (Result, error) {
 	if err != nil {
 		expected, _ = utils.NewUnsignedRanges[uint16]("200-299")
 	}
-	lat, err := c.Latency(ctx, h, c.opts.ProbeURL, 2000, expected)
+	timeout := c.opts.ProbeTimeoutMs
+	if timeout <= 0 {
+		timeout = 2000
+	}
+	lat, err := c.Latency(ctx, h, c.opts.ProbeURL, int64(timeout), expected)
 	if err != nil {
 		return Result{ProbeCount: 1}, nil
 	}

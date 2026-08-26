@@ -36,6 +36,7 @@ type Settings struct {
 	ExcludeCountries []string `json:"exclude_countries"`
 	ExcludeProtocols []string `json:"exclude_protocols"`
 	Workers          int      `json:"workers"`
+	ProbeTimeoutMs   int      `json:"probe_timeout_ms"`
 	SubValidityInterval string `json:"sub_validity_interval"` // e.g. "5m"
 	SubPingInterval    string `json:"sub_ping_interval"`      // e.g. "30m"
 	SubTopN            int    `json:"sub_topn"`               // 0 = use TopN
@@ -50,7 +51,8 @@ func Default() Settings {
 		DegradeMs:    0,
 		MinKeep:      1,
 		CorpseCycles: 5,
-		Workers:      32,
+		Workers:      350,
+		ProbeTimeoutMs: 2000,
 		SubValidityInterval: "5m",
 		SubPingInterval:    "30m",
 	}

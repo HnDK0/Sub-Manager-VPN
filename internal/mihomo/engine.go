@@ -20,7 +20,12 @@ type Options struct {
 	SpeedTestURL  string
 	MinSpeedMbps  int
 	SpeedTestTopN int
-	Workers       int // probe concurrency semaphore (default 32)
+	// Workers is the bounded probe-concurrency semaphore — the real concurrency
+	// knob. Clamped to [16, 512] in New(): 512 is the RAM/network-safe ceiling
+	// for gentle probing (no unbounded fan-out). 0 defaults to 350.
+	Workers int
+	// ProbeTimeoutMs bounds each URLTest (ms). 0 defaults to 2000.
+	ProbeTimeoutMs int
 }
 
 type speedCtxKey struct{}
@@ -45,7 +50,13 @@ type ProbeEngine interface {
 // New builds an embedded mihomo controller.
 func New(opts Options) *Controller {
 	if opts.Workers <= 0 || opts.Workers < 16 {
-		opts.Workers = 32
+		opts.Workers = 350
+	}
+	if opts.Workers > 512 {
+		opts.Workers = 512
+	}
+	if opts.ProbeTimeoutMs <= 0 {
+		opts.ProbeTimeoutMs = 2000
 	}
 	if opts.ProbeURL == "" {
 		opts.ProbeURL = "https://www.gstatic.com/generate_204"

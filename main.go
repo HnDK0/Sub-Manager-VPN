@@ -44,7 +44,8 @@ type Config struct {
 	SpeedTestTopN    int      // MB cap for the speed sample download
 	ExcludeCountries []string // ISO codes excluded from subscriptions (e.g. ru,cn)
 	ExcludeProtocols []string // schemes excluded from probing/subscriptions (e.g. vmess,trojan)
-	Workers          int      // probe worker-pool size (in-process mihomo concurrency); 0 = default 32
+	Workers          int      // probe worker-pool size (in-process mihomo concurrency); clamped [16,512], default 350
+	ProbeTimeoutMs   int      // per-URLTest timeout (ms); 0 = engine default 2000
 	SubValidityInterval time.Duration
 	SubPingInterval    time.Duration
 	SubTopN            int
@@ -93,6 +94,7 @@ func main() {
 		ExcludeCountries: cfg.ExcludeCountries,
 		ExcludeProtocols: cfg.ExcludeProtocols,
 		Workers:          cfg.Workers,
+		ProbeTimeoutMs:   cfg.ProbeTimeoutMs,
 	}
 	if err := settings.Save(configPath, eff); err != nil {
 		log.Printf("config: save %s: %v", configPath, err)
@@ -173,7 +175,8 @@ func parseFlags() (Config, string) {
 	speedTestTopN := flag.Int("speed-test-topn", dfltInt(existed, loaded.SpeedTestTopN, 5), "MB cap for the speed sample download")
 	excludeCountries := flag.String("exclude-countries", strings.Join(loaded.ExcludeCountries, ","), "comma-separated ISO country codes to exclude from subscriptions (e.g. ru,cn)")
 	excludeProtocols := flag.String("exclude-protocols", strings.Join(loaded.ExcludeProtocols, ","), "comma-separated schemes to exclude from probing/subscriptions (e.g. vmess,trojan)")
-	workers := flag.Int("workers", dfltInt(existed, loaded.Workers, 32), "probe worker-pool size (in-process mihomo concurrency); 16-32 recommended, default 32")
+	workers := flag.Int("workers", dfltInt(existed, loaded.Workers, 350), "probe worker-pool size (in-process mihomo concurrency); clamped [16,512], default 350")
+	probeTimeout := flag.Int("probe-timeout", dfltInt(existed, loaded.ProbeTimeoutMs, 2000), "probe timeout per URLTest in ms (default 2000)")
 	// Re-register -config on the main set so flag.Parse accepts it (value already resolved).
 	flag.String("config", configPath, "persisted runtime config (config.json); CLI flags override file values")
 	flag.Parse()
@@ -222,6 +225,7 @@ func parseFlags() (Config, string) {
 		ExcludeCountries: excl,
 		ExcludeProtocols: exclP,
 		Workers:          *workers,
+		ProbeTimeoutMs:   *probeTimeout,
 		SubValidityInterval: *subValidity,
 		SubPingInterval:     *subPing,
 		SubTopN:             *subTopN,
@@ -348,6 +352,7 @@ func runInner(ctx context.Context, cfg Config, sch *scheduler.Scheduler, skipUI 
 		ExcludeCountries: cfg.ExcludeCountries,
 		ExcludeProtocols: cfg.ExcludeProtocols,
 		Workers:          cfg.Workers,
+		ProbeTimeoutMs:   cfg.ProbeTimeoutMs,
 		SubValidityInterval: cfg.SubValidityInterval,
 		SubPingInterval:     cfg.SubPingInterval,
 		SubTopN:             cfg.SubTopN,

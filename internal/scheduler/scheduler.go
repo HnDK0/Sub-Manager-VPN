@@ -67,8 +67,10 @@ type Config struct {
 	ExcludeProtocols []string
 	// Workers is the in-process probe-concurrency semaphore: it bounds
 	// concurrent Latency/Speed calls inside the embedded mihomo engine.
-	// 0 defaults to 32.
+	// Clamped to [16, 512]; 0 defaults to 350. Bounded — never unbounded.
 	Workers int
+	// ProbeTimeoutMs bounds each URLTest (ms); 0 defaults to 2000 inside engine.
+	ProbeTimeoutMs int
 
 	// SubValidityInterval drives the SubValidity timer: aliveness (latency) of
 	// each subscription member. 0 defaults to 5m.
@@ -241,7 +243,10 @@ func New(cfg Config) (*Scheduler, error) {
 		cfg.CorpseCycles = 5
 	}
 	if cfg.Workers <= 0 || cfg.Workers < 16 {
-		cfg.Workers = 32
+		cfg.Workers = 350
+	}
+	if cfg.Workers > 512 {
+		cfg.Workers = 512
 	}
 	if cfg.SubValidityInterval <= 0 {
 		cfg.SubValidityInterval = 5 * time.Minute
@@ -269,6 +274,7 @@ func New(cfg Config) (*Scheduler, error) {
 		MinSpeedMbps:  cfg.MinSpeedMbps,
 		SpeedTestTopN: cfg.SpeedTestTopN,
 		Workers:       cfg.Workers,
+		ProbeTimeoutMs: cfg.ProbeTimeoutMs,
 	})
 
 	persister := selector.NewPersister(cfg.OutDir, cfg.MinKeep)
@@ -830,61 +836,32 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 	// produced for the filtered slice, so skipped nodes never reach selection.
 	s.setStatus(func(st *Snapshot) { st.Phase = PhaseProbe })
 
-	// Partition into previously-alive ("valid") nodes vs the rest so the cycle
-	// STARTS by re-probing the valid pool — corpses in the valid set are
-	// detected and dropped from the subscription at the very start of the probe
-	// phase, before new/uncertain nodes are touched.
-	validHashes, err := s.st.AliveNodeHashes()
-	if err != nil {
-		log.Printf("scheduler: alive node hashes: %v", err)
-	}
-	validSet := make(map[string]bool, len(validHashes))
-	for _, h := range validHashes {
-		validSet[h] = true
-	}
-	probeValid := make([]model.Node, 0, len(nodes))
-	probeOther := make([]model.Node, 0, len(nodes))
+	// One engine reload for the whole batch, then a bounded fan-out probe.
+	// Previously this was split into a "valid-first" pass + a second pass, each
+	// with its own mihomo config reload (two full rebuilds per cycle). A single
+	// reload + one ProbeFn call is enough: every node — alive or new — is
+	// re-measured each cycle, so corpses in the valid set are still caught. The
+	// reload is required so the per-node Probe hot path finds every node already
+	// present and skips EnsureNode (which would otherwise reload config under the
+	// write lock, serializing the pool back to ~1-by-1).
+	probeNodes := make([]model.Node, 0, len(nodes))
 	for _, n := range nodes {
 		if exclude[strings.ToUpper(n.Country)] || skipProto[strings.ToLower(string(n.Protocol))] {
 			continue
 		}
-		if validSet[nodeHash(&n)] {
-			probeValid = append(probeValid, n)
-		} else {
-			probeOther = append(probeOther, n)
-		}
+		probeNodes = append(probeNodes, n)
 	}
 
-	// Probe the valid pool FIRST: one engine reload, then concurrent URLTests
-	// under the read lock. The Probe hot path (controller.go) assumes every node
-	// is already present and skips EnsureNode; without the sync each node
-	// triggers EnsureNode (exclusive write lock + full mihomo config reload),
-	// serializing the pool back to ~1-by-1.
 	results := make(map[string]mihomo.Result)
-	if len(probeValid) > 0 {
-		if err := s.engine.SyncNodes(probeValid); err != nil {
-			log.Printf("scheduler: sync valid nodes: %v", err)
+	if len(probeNodes) > 0 {
+		if err := s.engine.SyncNodes(probeNodes); err != nil {
+			log.Printf("scheduler: sync nodes: %v", err)
 		}
-		vr, e := s.ProbeFn(cctx, probeValid)
+		r, e := s.ProbeFn(cctx, probeNodes)
 		if e != nil {
-			return fmt.Errorf("scheduler: probe valid: %w", e)
+			return fmt.Errorf("scheduler: probe: %w", e)
 		}
-		for k, v := range vr {
-			results[k] = v
-		}
-	}
-	// Then probe the rest (new/uncertain/corpses) with a second engine reload.
-	if len(probeOther) > 0 {
-		if err := s.engine.SyncNodes(probeOther); err != nil {
-			log.Printf("scheduler: sync other nodes: %v", err)
-		}
-		or, e := s.ProbeFn(cctx, probeOther)
-		if e != nil {
-			return fmt.Errorf("scheduler: probe other: %w", e)
-		}
-		for k, v := range or {
-			results[k] = v
-		}
+		results = r
 	}
 
 	// ponytail: probe results are now persisted live inside defaultProbe, as
