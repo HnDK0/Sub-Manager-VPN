@@ -87,10 +87,22 @@ func (c *Controller) Start() {
 func (c *Controller) buildConfig(nodes []model.Node) []byte {
 	proxies := make([]map[string]any, 0, len(nodes))
 	names := make([]string, 0, len(nodes))
+	seen := make(map[string]struct{}, len(nodes))
 	for _, n := range nodes {
 		p := buildProxyYAML(n)
+		name, _ := p["name"].(string)
+		// ponytail: two identical nodes (same endpoint from different sources)
+		// collide on the mihomo proxy name; mihomo rejects the whole config on
+		// a duplicate-name error, which makes SyncNodes fail and forces every
+		// probe into the serial EnsureNode reload path. Drop the duplicate.
+		if name != "" {
+			if _, dup := seen[name]; dup {
+				continue
+			}
+			seen[name] = struct{}{}
+		}
 		proxies = append(proxies, p)
-		names = append(names, p["name"].(string))
+		names = append(names, name)
 	}
 	cfg := map[string]any{
 		"mixed-port":         c.mixedPort,
