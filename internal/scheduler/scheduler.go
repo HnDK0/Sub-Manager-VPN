@@ -190,6 +190,10 @@ type Scheduler struct {
 	ProbeFn func(ctx context.Context, nodes []model.Node) (map[string]mihomo.Result, error)
 	GeoFn   func(n model.Node) string
 
+	// curCycle is the cycle number of the currently running cycle. defaultProbe
+	// reads it to tag live result rows as they are persisted during the probe.
+	curCycle int
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -474,6 +478,13 @@ func (s *Scheduler) defaultProbe(ctx context.Context, nodes []model.Node) (map[s
 			}
 			mu.Lock()
 			out[nodeHash(&n)] = r
+			// ponytail: live pool update — persist each result as it finishes so
+			// the Nodes table (nodeViews joins the latest results row) refreshes
+			// row-by-row during the probe instead of only at cycle end.
+			if id, derr := s.st.NodeID(nodeHash(&n)); derr == nil {
+				_ = s.st.RecordResult(id, r.Alive, int(r.LatencyMs), int(r.SpeedKbps), s.curCycle)
+				_ = s.st.AddHistory(id, int(r.LatencyMs), s.curCycle)
+			}
 			mu.Unlock()
 			s.setStatus(func(st *Snapshot) {
 				st.ProbeDone++ // ponytail: live probe progress for the UI
@@ -722,6 +733,7 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 		st.StartedAt = start
 		st.LastError = ""
 	})
+	s.curCycle = cycle
 
 	var nodes []model.Node
 	for _, src := range sources {
@@ -840,25 +852,9 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 		return fmt.Errorf("scheduler: probe: %w", err)
 	}
 
-	// Persist probe results so history, retention pruning, and consecutive-dead
-	// tracking stay accurate across cycles (a single engine.Probe does not write
-	// to state on its own).
-	for _, en := range enrichedNodes {
-		r, ok := results[en.hash]
-		if !ok {
-			continue
-		}
-		id, err := s.st.NodeID(en.hash)
-		if err != nil {
-			continue
-		}
-		if err := s.st.RecordResult(id, r.Alive, int(r.LatencyMs), int(r.SpeedKbps), cycle); err != nil {
-			log.Printf("scheduler: record result: %v", err)
-		}
-		if err := s.st.AddHistory(id, int(r.LatencyMs), cycle); err != nil {
-			log.Printf("scheduler: add history: %v", err)
-		}
-	}
+	// ponytail: probe results are now persisted live inside defaultProbe, as
+	// each node finishes probing (not batched at cycle end). The 'results' and
+	// 'history' rows feed nodeViews(), so the Nodes pool refreshes row-by-row.
 
 	// ponytail: if the cycle was stopped mid-probe, keep the already-collected
 	// results (recorded above) but DO NOT run selection/reconcile/regenerate —
