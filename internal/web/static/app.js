@@ -577,7 +577,46 @@ $("btn-node-test").onclick = async () => {
 
 // ── Subscriptions ───────────────────────────────────────────────────
 async function loadSubscriptions() {
-  await Promise.all([loadGenerate(), loadPublish()]);
+  await Promise.all([loadSubMembers(), loadGenerate(), loadPublish()]);
+}
+
+async function loadSubMembers() {
+  try {
+    const d = await api("/subscription/list");
+    renderSubMembers(d);
+  } catch (e) { toast(e.message); }
+}
+
+function renderSubMembers(d) {
+  const list = d.members || [];
+  $("sub-mem-count").textContent = list.length;
+  const tb = $("sub-mem-table").querySelector("tbody");
+  const empty = $("sub-mem-empty");
+  if (!list.length) {
+    tb.innerHTML = "";
+    empty.classList.remove("hidden");
+    return;
+  }
+  empty.classList.add("hidden");
+  tb.innerHTML = list.map(m => `
+    <tr>
+      <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis" title="${esc(m.name || m.hash)}">${esc(m.name || m.hash.slice(0, 16) + "…")}</td>
+      <td>${esc(countryName(m.country))}</td>
+      <td><span class="chip chip-neutral">${esc(m.protocol)}</span></td>
+      <td>${m.alive ? '<span class="chip chip-ok">alive</span>' : '<span class="chip chip-bad">dead</span>'}</td>
+      <td class="lat-cell">${latencyHTML(m.latencyMs, m.alive)}</td>
+      <td class="muted">${m.pingCheckedAt ? new Date(m.pingCheckedAt).toLocaleString() : "—"}</td>
+      <td><button class="btn btn-sm btn-ghost btn-danger" data-sub-rm="${esc(m.hash)}">Remove</button></td>
+    </tr>`).join("");
+  tb.querySelectorAll("[data-sub-rm]").forEach(b => b.onclick = () => removeSubMember(b.dataset.subRm));
+}
+
+async function removeSubMember(hash) {
+  try {
+    await api("/subscription/" + encodeURIComponent(hash), { method: "DELETE" });
+    loadSubMembers();
+    toast("member removed");
+  } catch (e) { toast(e.message); }
 }
 
 async function loadGenerate() {

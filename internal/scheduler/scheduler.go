@@ -462,8 +462,14 @@ func (s *Scheduler) defaultProbe(ctx context.Context, nodes []model.Node) (map[s
 			defer func() { <-sem }()
 			r, err := s.engine.Probe(ctx, n)
 			if err != nil {
-				// Infra failure (pool down / ctx cancelled): drop this node this
-				// cycle instead of stalling the whole batch. ponytail: next cycle recovers it.
+				// Infra failure (pool down): drop this node this cycle instead
+				// of stalling the whole batch. ponytail: next cycle recovers it.
+				return
+			}
+			// ponytail: a cancelled cycle must not advance the progress counter
+			// or record aborted probes — only nodes that actually finished before
+			// StopCycle are counted/kept; the rest stay unrecorded.
+			if ctx.Err() != nil {
 				return
 			}
 			mu.Lock()
@@ -546,6 +552,19 @@ func (s *Scheduler) Run(ctx context.Context) error {
 
 	s.engine.Start()
 	s.setStatus(func(st *Snapshot) { st.Running = true })
+
+	// FIX A: boot rehydration — load every persisted common node into the engine
+	// and rebuild out/ from the persisted subscription table on EVERY start, so a
+	// restart does not lose progress (valid nodes / served files). Runs before the
+	// grace-skip below because the in-memory engine and out/ are lost on restart.
+	if all, err := s.fullUnion(nil); err == nil && len(all) > 0 {
+		if err := s.engine.SyncNodes(all); err != nil {
+			log.Printf("scheduler: boot sync nodes: %v", err)
+		}
+	}
+	if err := s.regenerateSubs(); err != nil {
+		log.Printf("scheduler: boot regenerate subs: %v", err)
+	}
 
 	// Skip the immediate startup cycle if a successful cycle completed recently
 	// (within the interval, or 1h if interval is zero). Avoids redundant work
@@ -757,7 +776,7 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 	}
 	geoWg.Wait()
 	if cctx.Err() != nil {
-		return cctx.Err() // ponytail: clean bail on cycle cancellation
+		return nil // ponytail: clean bail on cycle cancellation (no spurious error log)
 	}
 	var enrichedNodes []enriched
 	for i, n := range nodes {
@@ -805,6 +824,17 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 		}
 		probeNodes = append(probeNodes, n)
 	}
+	// Sync the full probe set into the engine ONCE before the batch probe. The
+	// Probe hot path (controller.go) assumes every node is already present and
+	// skips EnsureNode; without this sync each new node triggers EnsureNode,
+	// which takes the exclusive write lock and reloads the whole mihomo config,
+	// serializing the entire worker pool back to ~1-by-1. One reload here lets
+	// all URLTests run concurrently under the read lock.
+	if len(probeNodes) > 0 {
+		if err := s.engine.SyncNodes(probeNodes); err != nil {
+			log.Printf("scheduler: sync probe nodes: %v", err)
+		}
+	}
 	results, err := s.ProbeFn(cctx, probeNodes)
 	if err != nil {
 		return fmt.Errorf("scheduler: probe: %w", err)
@@ -828,6 +858,14 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 		if err := s.st.AddHistory(id, int(r.LatencyMs), cycle); err != nil {
 			log.Printf("scheduler: add history: %v", err)
 		}
+	}
+
+	// ponytail: if the cycle was stopped mid-probe, keep the already-collected
+	// results (recorded above) but DO NOT run selection/reconcile/regenerate —
+	// an empty `selected` would wipe the existing subscription. The next cycle
+	// recovers the unprobed nodes.
+	if cctx.Err() != nil {
+		return nil
 	}
 
 	// Enforce bounded retention so results/history/nodes don't grow unbounded
@@ -871,6 +909,42 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 	})
 	selected := selector.Select(cands, s.cfg.TopN)
 	selected = applyDegrade(selected, cands, s.cfg.DegradeMs)
+
+	// FIX C: reconcile the subscription table to exactly the best selection so a
+	// freshly-probed good node actually enters the served subscription (not only
+	// via death-replacement). Banned nodes are skipped, so manual UI removals
+	// stick; banned members are naturally absent from selected and get removed.
+	// Member identity uses ListSubscription().NodeID (the real node hash) because
+	// SubscriptionMemberNodes() does not expose Security/Encryption, which
+	// nodeHash depends on.
+	members, err := s.st.ListSubscription()
+	if err != nil {
+		log.Printf("scheduler: reconcile list subscription: %v", err)
+	} else {
+		selSet := make(map[string]bool, len(selected))
+		for _, c := range selected {
+			h := nodeHash(&c.Node)
+			if s.cfg.IsBanned != nil && s.cfg.IsBanned(h) {
+				continue
+			}
+			selSet[h] = true
+			if err := s.st.AddSubscription(h); err != nil {
+				log.Printf("scheduler: reconcile add %s: %v", h, err)
+			}
+		}
+		// Only prune members when we actually have a selection. An empty
+		// selection (all probed nodes dead this cycle) must NOT wipe the
+		// subscription — keep the last-known-good set (MinKeep semantics).
+		if len(selected) > 0 {
+			for _, m := range members {
+				if !selSet[m.NodeID] {
+					if err := s.st.RemoveSubscription(m.NodeID); err != nil {
+						log.Printf("scheduler: reconcile remove %s: %v", m.NodeID, err)
+					}
+				}
+			}
+		}
+	}
 
 	s.setStatus(func(st *Snapshot) { st.Phase = PhasePersist })
 	// Single writer to out/: regenerateSubs gathers the current subscription

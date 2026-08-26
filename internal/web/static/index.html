@@ -134,6 +134,14 @@
     <!-- Subscriptions -->
     <section id="tab-subscriptions" class="tab">
       <div class="panel">
+        <h3>Members <span id="sub-mem-count" class="badge"></span></h3>
+        <table id="sub-mem-table">
+          <thead><tr><th>Name</th><th>Country</th><th>Protocol</th><th>Status</th><th>Latency</th><th>Last Ping</th><th>Actions</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <div id="sub-mem-empty" class="empty hidden">No subscription members.</div>
+      </div>
+      <div class="panel" style="margin-top:12px">
         <h3>Generated Files</h3>
         <div id="sub-gen-files"></div>
         <div id="sub-gen-empty" class="empty hidden">No generated files yet.</div>

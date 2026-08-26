@@ -181,6 +181,7 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 		writeJSONErrorLog(w, http.StatusBadRequest, "bad request", err)
 		return
 	}
+	added := false
 	if strings.TrimSpace(body.Text) != "" {
 		var errs []string
 		for _, line := range strings.Split(body.Text, "\n") {
@@ -199,16 +200,23 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, "failed to add some sources: "+strings.Join(errs, "; "))
 			return
 		}
+		added = true
 	} else if u := strings.TrimSpace(body.URL); u != "" {
 		if _, err := s.reg.AddSource(u); err != nil {
 			writeJSONErrorLog(w, http.StatusBadRequest, "failed to add source: "+err.Error(), err)
 			return
 		}
+		added = true
 	}
 	list, err := s.reg.ListSources()
 	if err != nil {
 		writeJSONErrorLog(w, http.StatusInternalServerError, "failed to list sources", err)
 		return
+	}
+	// FIX B: a newly added source must be probed promptly instead of waiting for
+	// the next commonTimer tick (default ~2h). RequestCycle is non-blocking.
+	if added {
+		s.sch.RequestCycle()
 	}
 	writeJSON(w, list)
 }
