@@ -1089,11 +1089,23 @@ func (s *Scheduler) SeedSubscription() error {
 // SubValidity checks each subscription member's aliveness via mihomo latency and
 // replaces any dead member immediately (ReplaceRoutine). It runs on its own
 // timer context, independent of the common scan.
+//
+// Probes are fanned out across workers (mirroring defaultProbe): the engine is
+// pre-synced with the member set so Probe takes the fast URLTest path instead of
+// the EnsureNode write-lock reload. Goroutines only probe + append to a guarded
+// slice; all DB/out writes (SetSubValidChecked, ReplaceRoutine) happen serially
+// after wg.Wait.
 func (s *Scheduler) SubValidity(ctx context.Context) error {
 	members, err := s.st.ListSubscription()
 	if err != nil {
 		return fmt.Errorf("list subscription: %w", err)
 	}
+	// Resolve nodes serially; drop orphaned rows (DB write) up front.
+	type probeItem struct {
+		m    state.SubscriptionRow
+		node model.Node
+	}
+	var items []probeItem
 	for _, m := range members {
 		n, e := s.st.NodeByHash(m.NodeID)
 		if e != nil {
@@ -1101,14 +1113,65 @@ func (s *Scheduler) SubValidity(ctx context.Context) error {
 			_ = s.st.RemoveSubscription(m.NodeID)
 			continue
 		}
-		res, e := s.engine.Probe(ctx, n)
-		if e != nil {
+		items = append(items, probeItem{m: m, node: n})
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	// Pre-sync the exact set we are about to probe so Probe stays on the
+	// concurrent URLTest path (no per-node EnsureNode reload thrash).
+	nodes := make([]model.Node, len(items))
+	for i, it := range items {
+		nodes[i] = it.node
+	}
+	if err := s.engine.SyncNodes(nodes); err != nil {
+		log.Printf("scheduler: subvalidity sync nodes: %v", err)
+	}
+	workers := s.cfg.Workers
+	if workers <= 0 {
+		workers = 32
+	}
+	sem := make(chan struct{}, workers)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	type probeResult struct {
+		m    state.SubscriptionRow
+		res  mihomo.Result
+		perr error
+	}
+	results := make([]probeResult, 0, len(items))
+	for _, it := range items {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(it probeItem) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			r, e := s.engine.Probe(ctx, it.node)
+			if e != nil {
+				// Infra failure: record, don't swallow silently.
+				log.Printf("scheduler: subvalidity probe %s: %v", it.m.NodeID, e)
+				mu.Lock()
+				results = append(results, probeResult{m: it.m, perr: e})
+				mu.Unlock()
+				return
+			}
+			mu.Lock()
+			results = append(results, probeResult{m: it.m, res: r})
+			mu.Unlock()
+		}(it)
+	}
+	wg.Wait()
+	// Serial post-processing: DB writes + ReplaceRoutine must stay serial.
+	for _, pr := range results {
+		if pr.perr != nil {
 			continue
 		}
-		_ = s.st.SetSubValidChecked(m.NodeID, time.Now().Unix())
-		if !res.Alive {
-			if err := s.ReplaceRoutine(m.NodeID); err != nil {
-				log.Printf("scheduler: replace routine %s: %v", m.NodeID, err)
+		if err := s.st.SetSubValidChecked(pr.m.NodeID, time.Now().Unix()); err != nil {
+			log.Printf("scheduler: set sub valid checked %s: %v", pr.m.NodeID, err)
+		}
+		if !pr.res.Alive {
+			if err := s.ReplaceRoutine(pr.m.NodeID); err != nil {
+				log.Printf("scheduler: replace routine %s: %v", pr.m.NodeID, err)
 			}
 		}
 	}
@@ -1117,11 +1180,21 @@ func (s *Scheduler) SubValidity(ctx context.Context) error {
 
 // SubPing refreshes latency for each subscription member and regenerates out/
 // when ordering may have changed. It runs on its own timer context.
+//
+// Probes are fanned out across workers (mirroring defaultProbe): the engine is
+// pre-synced with the member set so Probe takes the fast URLTest path. Goroutines
+// only probe + append to a guarded slice; SetSubPing and the single regenerateSubs
+// call happen serially after wg.Wait.
 func (s *Scheduler) SubPing(ctx context.Context) error {
 	members, err := s.st.ListSubscription()
 	if err != nil {
 		return fmt.Errorf("list subscription: %w", err)
 	}
+	type probeItem struct {
+		m    state.SubscriptionRow
+		node model.Node
+	}
+	var items []probeItem
 	changed := false
 	for _, m := range members {
 		n, e := s.st.NodeByHash(m.NodeID)
@@ -1130,12 +1203,63 @@ func (s *Scheduler) SubPing(ctx context.Context) error {
 			changed = true
 			continue
 		}
-		res, e := s.engine.Probe(ctx, n)
-		if e != nil {
+		items = append(items, probeItem{m: m, node: n})
+	}
+	if len(items) == 0 {
+		if changed {
+			if err := s.regenerateSubs(); err != nil {
+				return fmt.Errorf("regenerate subs: %w", err)
+			}
+		}
+		return nil
+	}
+	nodes := make([]model.Node, len(items))
+	for i, it := range items {
+		nodes[i] = it.node
+	}
+	if err := s.engine.SyncNodes(nodes); err != nil {
+		log.Printf("scheduler: subping sync nodes: %v", err)
+	}
+	workers := s.cfg.Workers
+	if workers <= 0 {
+		workers = 32
+	}
+	sem := make(chan struct{}, workers)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	type probeResult struct {
+		m    state.SubscriptionRow
+		res  mihomo.Result
+		perr error
+	}
+	results := make([]probeResult, 0, len(items))
+	for _, it := range items {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(it probeItem) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			r, e := s.engine.Probe(ctx, it.node)
+			if e != nil {
+				log.Printf("scheduler: subping probe %s: %v", it.m.NodeID, e)
+				mu.Lock()
+				results = append(results, probeResult{m: it.m, perr: e})
+				mu.Unlock()
+				return
+			}
+			mu.Lock()
+			results = append(results, probeResult{m: it.m, res: r})
+			mu.Unlock()
+		}(it)
+	}
+	wg.Wait()
+	// Serial post-processing: SetSubPing + single regenerateSubs at the end.
+	for _, pr := range results {
+		if pr.perr != nil {
 			continue
 		}
-		if e := s.st.SetSubPing(m.NodeID, int(res.LatencyMs), time.Now().Unix()); e != nil {
-			log.Printf("scheduler: set sub ping %s: %v", m.NodeID, e)
+		if e := s.st.SetSubPing(pr.m.NodeID, int(pr.res.LatencyMs), time.Now().Unix()); e != nil {
+			log.Printf("scheduler: set sub ping %s: %v", pr.m.NodeID, e)
 		}
 		changed = true
 	}
