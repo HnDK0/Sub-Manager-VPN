@@ -669,6 +669,36 @@ func (s *State) ConsecutiveDead(nodeID int64) (int, error) {
 	return count, res.Err()
 }
 
+// AliveNodeHashes returns the hashes of nodes whose most-recent results row is
+// alive=1. The scheduler uses this to partition the freshly-parsed node set so
+// the cycle probes the previously-alive ("valid") pool first and cleans corpses
+// out of it at the start of the probe phase.
+func (s *State) AliveNodeHashes() ([]string, error) {
+	const q = `
+		SELECT n.hash
+		FROM nodes n
+		JOIN (
+			SELECT node_id, alive,
+			       ROW_NUMBER() OVER (PARTITION BY node_id ORDER BY cycle_id DESC, checked_at DESC) AS rn
+			FROM results
+		) r ON r.node_id = n.id AND r.rn = 1
+		WHERE r.alive = 1`
+	rows, err := s.db.Query(q)
+	if err != nil {
+		return nil, fmt.Errorf("alive node hashes: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var h string
+		if err := rows.Scan(&h); err != nil {
+			return nil, fmt.Errorf("scan alive hash: %w", err)
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
 // deadNodeIDs returns the ids of nodes whose consecutive-dead count reaches
 // deadCycles (most recent results all dead).
 func (s *State) deadNodeIDs(deadCycles int) ([]int64, error) {

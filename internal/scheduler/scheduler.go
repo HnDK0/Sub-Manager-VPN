@@ -829,27 +829,62 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 	// derives from the full node set (for upsert/history), but results are only
 	// produced for the filtered slice, so skipped nodes never reach selection.
 	s.setStatus(func(st *Snapshot) { st.Phase = PhaseProbe })
-	probeNodes := make([]model.Node, 0, len(nodes))
+
+	// Partition into previously-alive ("valid") nodes vs the rest so the cycle
+	// STARTS by re-probing the valid pool — corpses in the valid set are
+	// detected and dropped from the subscription at the very start of the probe
+	// phase, before new/uncertain nodes are touched.
+	validHashes, err := s.st.AliveNodeHashes()
+	if err != nil {
+		log.Printf("scheduler: alive node hashes: %v", err)
+	}
+	validSet := make(map[string]bool, len(validHashes))
+	for _, h := range validHashes {
+		validSet[h] = true
+	}
+	probeValid := make([]model.Node, 0, len(nodes))
+	probeOther := make([]model.Node, 0, len(nodes))
 	for _, n := range nodes {
 		if exclude[strings.ToUpper(n.Country)] || skipProto[strings.ToLower(string(n.Protocol))] {
 			continue
 		}
-		probeNodes = append(probeNodes, n)
-	}
-	// Sync the full probe set into the engine ONCE before the batch probe. The
-	// Probe hot path (controller.go) assumes every node is already present and
-	// skips EnsureNode; without this sync each new node triggers EnsureNode,
-	// which takes the exclusive write lock and reloads the whole mihomo config,
-	// serializing the entire worker pool back to ~1-by-1. One reload here lets
-	// all URLTests run concurrently under the read lock.
-	if len(probeNodes) > 0 {
-		if err := s.engine.SyncNodes(probeNodes); err != nil {
-			log.Printf("scheduler: sync probe nodes: %v", err)
+		if validSet[nodeHash(&n)] {
+			probeValid = append(probeValid, n)
+		} else {
+			probeOther = append(probeOther, n)
 		}
 	}
-	results, err := s.ProbeFn(cctx, probeNodes)
-	if err != nil {
-		return fmt.Errorf("scheduler: probe: %w", err)
+
+	// Probe the valid pool FIRST: one engine reload, then concurrent URLTests
+	// under the read lock. The Probe hot path (controller.go) assumes every node
+	// is already present and skips EnsureNode; without the sync each node
+	// triggers EnsureNode (exclusive write lock + full mihomo config reload),
+	// serializing the pool back to ~1-by-1.
+	results := make(map[string]mihomo.Result)
+	if len(probeValid) > 0 {
+		if err := s.engine.SyncNodes(probeValid); err != nil {
+			log.Printf("scheduler: sync valid nodes: %v", err)
+		}
+		vr, e := s.ProbeFn(cctx, probeValid)
+		if e != nil {
+			return fmt.Errorf("scheduler: probe valid: %w", e)
+		}
+		for k, v := range vr {
+			results[k] = v
+		}
+	}
+	// Then probe the rest (new/uncertain/corpses) with a second engine reload.
+	if len(probeOther) > 0 {
+		if err := s.engine.SyncNodes(probeOther); err != nil {
+			log.Printf("scheduler: sync other nodes: %v", err)
+		}
+		or, e := s.ProbeFn(cctx, probeOther)
+		if e != nil {
+			return fmt.Errorf("scheduler: probe other: %w", e)
+		}
+		for k, v := range or {
+			results[k] = v
+		}
 	}
 
 	// ponytail: probe results are now persisted live inside defaultProbe, as
