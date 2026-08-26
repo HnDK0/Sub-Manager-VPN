@@ -27,7 +27,6 @@ type Config struct {
 	SourcesPath      string // plain-text sources whitelist (separate from state DB)
 	AssetsDir        string
 	OutDir           string
-	CoresDir         string
 	Interval         time.Duration
 	TopN             int
 	DegradeMs        int
@@ -45,7 +44,10 @@ type Config struct {
 	SpeedTestTopN    int      // MB cap for the speed sample download
 	ExcludeCountries []string // ISO codes excluded from subscriptions (e.g. ru,cn)
 	ExcludeProtocols []string // schemes excluded from probing/subscriptions (e.g. vmess,trojan)
-	Workers          int      // probe worker-pool size (each owns one xray process); 0 = default 8
+	Workers          int      // probe worker-pool size (in-process mihomo concurrency); 0 = default 32
+	SubValidityInterval time.Duration
+	SubPingInterval    time.Duration
+	SubTopN            int
 }
 
 // main parses flags, builds the Config, and delegates all wiring to run so it
@@ -74,7 +76,6 @@ func main() {
 		SourcesPath:      cfg.SourcesPath,
 		AssetsDir:        cfg.AssetsDir,
 		OutDir:           cfg.OutDir,
-		CoresDir:         cfg.CoresDir,
 		Interval:         cfg.Interval.String(),
 		TopN:             cfg.TopN,
 		DegradeMs:        cfg.DegradeMs,
@@ -128,7 +129,6 @@ func parseFlags() (Config, string) {
 	sourcesPath := flag.String("sources", firstNonEmpty(loaded.SourcesPath, filepath.Join(appDir, "sources.txt")), "sources whitelist file (plain text)")
 	assetsDir := flag.String("assets", firstNonEmpty(loaded.AssetsDir, filepath.Join(appDir, "assets")), "assets dir (geo db, etc.)")
 	outDir := flag.String("out", firstNonEmpty(loaded.OutDir, filepath.Join(appDir, "out")), "generated subscriptions dir")
-	coresDir := flag.String("cores", firstNonEmpty(loaded.CoresDir, filepath.Join(appDir, "cores")), "core binaries (xray/sing-box) dir")
 	intervalDef := 2 * time.Hour
 	if existed && loaded.Interval != "" {
 		if d, perr := time.ParseDuration(loaded.Interval); perr == nil {
@@ -137,7 +137,26 @@ func parseFlags() (Config, string) {
 			log.Printf("config: bad interval %q: %v (using 2h)", loaded.Interval, perr)
 		}
 	}
+	subValidityDef := 5 * time.Minute
+	if existed && loaded.SubValidityInterval != "" {
+		if d, perr := time.ParseDuration(loaded.SubValidityInterval); perr == nil {
+			subValidityDef = d
+		} else {
+			log.Printf("config: bad sub_validity_interval %q: %v (using 5m)", loaded.SubValidityInterval, perr)
+		}
+	}
+	subPingDef := 30 * time.Minute
+	if existed && loaded.SubPingInterval != "" {
+		if d, perr := time.ParseDuration(loaded.SubPingInterval); perr == nil {
+			subPingDef = d
+		} else {
+			log.Printf("config: bad sub_ping_interval %q: %v (using 30m)", loaded.SubPingInterval, perr)
+		}
+	}
 	interval := flag.Duration("interval", intervalDef, "refresh interval")
+	subValidity := flag.Duration("sub-validity", subValidityDef, "subscription aliveness check interval")
+	subPing := flag.Duration("sub-ping", subPingDef, "subscription latency refresh interval")
+	subTopN := flag.Int("sub-topn", dfltInt(existed, loaded.SubTopN, 0), "subscription top-N per country (0 = use topn)")
 	topn := flag.Int("topn", dfltInt(existed, loaded.TopN, 5), "top-N nodes per country (clamped 3..500)")
 	degrade := flag.Int("degrade", dfltInt(existed, loaded.DegradeMs, 0), "degrade latency threshold (ms)")
 	minkeep := flag.Int("minkeep", dfltInt(existed, loaded.MinKeep, 1), "minimum kept subscription versions")
@@ -154,7 +173,7 @@ func parseFlags() (Config, string) {
 	speedTestTopN := flag.Int("speed-test-topn", dfltInt(existed, loaded.SpeedTestTopN, 5), "MB cap for the speed sample download")
 	excludeCountries := flag.String("exclude-countries", strings.Join(loaded.ExcludeCountries, ","), "comma-separated ISO country codes to exclude from subscriptions (e.g. ru,cn)")
 	excludeProtocols := flag.String("exclude-protocols", strings.Join(loaded.ExcludeProtocols, ","), "comma-separated schemes to exclude from probing/subscriptions (e.g. vmess,trojan)")
-	workers := flag.Int("workers", dfltInt(existed, loaded.Workers, 4), "probe worker-pool size (each owns one xray process); lower = gentler on weak VPS/network (default 4)")
+	workers := flag.Int("workers", dfltInt(existed, loaded.Workers, 4), "probe worker-pool size (in-process mihomo concurrency); lower = gentler on weak VPS/network (default 4)")
 	// Re-register -config on the main set so flag.Parse accepts it (value already resolved).
 	flag.String("config", configPath, "persisted runtime config (config.json); CLI flags override file values")
 	flag.Parse()
@@ -185,7 +204,6 @@ func parseFlags() (Config, string) {
 		SourcesPath:      *sourcesPath,
 		AssetsDir:        *assetsDir,
 		OutDir:           *outDir,
-		CoresDir:         *coresDir,
 		Interval:         *interval,
 		TopN:             n,
 		DegradeMs:        *degrade,
@@ -204,6 +222,9 @@ func parseFlags() (Config, string) {
 		ExcludeCountries: excl,
 		ExcludeProtocols: exclP,
 		Workers:          *workers,
+		SubValidityInterval: *subValidity,
+		SubPingInterval:     *subPing,
+		SubTopN:             *subTopN,
 	}, configPath
 }
 
@@ -266,7 +287,7 @@ func run(ctx context.Context, cfg Config, sch *scheduler.Scheduler, configPath s
 // the scheduler-wait shutdown path.
 func runInner(ctx context.Context, cfg Config, sch *scheduler.Scheduler, skipUI bool, configPath string) error {
 	// 1. Ensure all required directories exist.
-	for _, dir := range []string{cfg.CoresDir, cfg.AssetsDir, cfg.OutDir, filepath.Dir(cfg.StatePath)} {
+	for _, dir := range []string{cfg.AssetsDir, cfg.OutDir, filepath.Dir(cfg.StatePath)} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("mkdir %s: %w", dir, err)
 		}
@@ -314,7 +335,6 @@ func runInner(ctx context.Context, cfg Config, sch *scheduler.Scheduler, skipUI 
 		StatePath:        cfg.StatePath,
 		SourcesPath:      cfg.SourcesPath,
 		AssetsDir:        cfg.AssetsDir,
-		CoreDir:          cfg.CoresDir,
 		OutDir:           cfg.OutDir,
 		Interval:         cfg.Interval,
 		TopN:             cfg.TopN,
@@ -328,6 +348,9 @@ func runInner(ctx context.Context, cfg Config, sch *scheduler.Scheduler, skipUI 
 		ExcludeCountries: cfg.ExcludeCountries,
 		ExcludeProtocols: cfg.ExcludeProtocols,
 		Workers:          cfg.Workers,
+		SubValidityInterval: cfg.SubValidityInterval,
+		SubPingInterval:     cfg.SubPingInterval,
+		SubTopN:             cfg.SubTopN,
 		IsBanned:         bansStore.Has,
 	}
 	if sch == nil {
@@ -378,9 +401,9 @@ func runInner(ctx context.Context, cfg Config, sch *scheduler.Scheduler, skipUI 
 		_ = webSrv.Stop()
 	}
 
-	// 7. Stop the publisher and scheduler so no xray subprocess or HTTP server
-	//    is left running. Cancelling ctx (signal) makes sch.Run return, which
-	//    closes the xray engine / kills the xray subprocess.
+	// 7. Stop the publisher and scheduler so no embedded mihomo hub or HTTP
+	//    server is left running. Cancelling ctx (signal) makes sch.Run return,
+	//    which closes the mihomo engine / stops the embedded hub.
 	if cfg.ServeAddr != "" {
 		_ = pub.Stop()
 	}

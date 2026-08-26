@@ -19,7 +19,6 @@ type Settings struct {
 	SourcesPath      string   `json:"sources_path"`
 	AssetsDir        string   `json:"assets_dir"`
 	OutDir           string   `json:"out_dir"`
-	CoresDir         string   `json:"cores_dir"`
 	Interval         string   `json:"interval"` // e.g. "2h"
 	TopN             int      `json:"topn"`
 	DegradeMs        int      `json:"degrade_ms"`
@@ -37,6 +36,9 @@ type Settings struct {
 	ExcludeCountries []string `json:"exclude_countries"`
 	ExcludeProtocols []string `json:"exclude_protocols"`
 	Workers          int      `json:"workers"`
+	SubValidityInterval string `json:"sub_validity_interval"` // e.g. "5m"
+	SubPingInterval    string `json:"sub_ping_interval"`      // e.g. "30m"
+	SubTopN            int    `json:"sub_topn"`               // 0 = use TopN
 }
 
 // Default returns the non-path defaults. Paths are left empty; the caller (main)
@@ -49,6 +51,8 @@ func Default() Settings {
 		MinKeep:      1,
 		CorpseCycles: 5,
 		Workers:      4,
+		SubValidityInterval: "5m",
+		SubPingInterval:    "30m",
 	}
 }
 

@@ -26,13 +26,14 @@ type Candidate struct {
 	Node      model.Node
 	LatencyMs int
 	Country   string
+	Hash      string
 }
 
 // Select ranks alive nodes per country by latency and returns the top TopN
 // from each country merged together. A country with fewer than TopN alive
 // nodes contributes ALL of its nodes (never padded with dead ones). TopN is
 // clamped to the supported range [3,500]; a non-positive value defaults to 5.
-func Select(cands []Candidate, topN int) []model.Node {
+func Select(cands []Candidate, topN int) []Candidate {
 	if topN <= 0 {
 		topN = 5
 	}
@@ -54,7 +55,7 @@ func Select(cands []Candidate, topN int) []model.Node {
 	}
 	sort.Strings(countries)
 
-	var out []model.Node
+	var out []Candidate
 	for _, country := range countries {
 		group := byCountry[country]
 		sort.SliceStable(group, func(i, j int) bool {
@@ -65,7 +66,7 @@ func Select(cands []Candidate, topN int) []model.Node {
 			limit = len(group)
 		}
 		for _, c := range group[:limit] {
-			out = append(out, c.Node)
+			out = append(out, c)
 		}
 	}
 	return out

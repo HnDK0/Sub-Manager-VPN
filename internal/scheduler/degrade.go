@@ -3,7 +3,6 @@ package scheduler
 import (
 	"sort"
 
-	"vpn-sub-manager/internal/model"
 	selector "vpn-sub-manager/internal/select"
 )
 
@@ -15,7 +14,7 @@ import (
 // is the lowest-latency alive candidate of the same country that is not already
 // selected. If no such candidate exists the original node is kept. Dead nodes
 // are never swapped in (cands only contains alive nodes).
-func applyDegrade(selected []model.Node, cands []selector.Candidate, degradeMs int) []model.Node {
+func applyDegrade(selected []selector.Candidate, cands []selector.Candidate, degradeMs int) []selector.Candidate {
 	if len(selected) == 0 {
 		return selected
 	}
@@ -27,7 +26,7 @@ func applyDegrade(selected []model.Node, cands []selector.Candidate, degradeMs i
 
 	lats := make([]int, 0, len(selected))
 	for _, n := range selected {
-		if c, ok := byHash[nodeHash(&n)]; ok {
+		if c, ok := byHash[nodeHash(&n.Node)]; ok {
 			lats = append(lats, c.LatencyMs)
 		} else {
 			lats = append(lats, 0)
@@ -37,13 +36,13 @@ func applyDegrade(selected []model.Node, cands []selector.Candidate, degradeMs i
 
 	taken := make(map[string]bool, len(selected))
 	for _, n := range selected {
-		taken[nodeHash(&n)] = true
+		taken[nodeHash(&n.Node)] = true
 	}
 
-	out := make([]model.Node, len(selected))
+	out := make([]selector.Candidate, len(selected))
 	copy(out, selected)
 	for i, n := range selected {
-		c, ok := byHash[nodeHash(&n)]
+		c, ok := byHash[nodeHash(&n.Node)]
 		if !ok {
 			continue
 		}
@@ -55,7 +54,7 @@ func applyDegrade(selected []model.Node, cands []selector.Candidate, degradeMs i
 			continue
 		}
 		if best, found := bestUnselected(cands, c.Country, taken); found {
-			out[i] = best.Node
+			out[i] = best
 			taken[nodeHash(&best.Node)] = true
 		}
 	}

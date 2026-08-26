@@ -6,7 +6,8 @@
 //
 // It is driven entirely in-process via time.Ticker (no external cron). Every
 // external dependency (fetch, probe, geo) is reachable through an injectable
-// function field so the whole cycle is unit-testable without network or xray.
+// function field so the whole cycle is unit-testable without network or
+// spawning the embedded hub.
 package scheduler
 
 import (
@@ -15,20 +16,20 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"vpn-sub-manager/internal/config"
-	"vpn-sub-manager/internal/core"
 	"vpn-sub-manager/internal/fetch"
 	"vpn-sub-manager/internal/filter"
 	"vpn-sub-manager/internal/geo"
+	"vpn-sub-manager/internal/mihomo"
 	"vpn-sub-manager/internal/model"
 	"vpn-sub-manager/internal/parse"
 	selector "vpn-sub-manager/internal/select"
 	"vpn-sub-manager/internal/state"
-	"vpn-sub-manager/internal/test"
 )
 
 // Config configures a Scheduler. Zero values for Interval/TopN/DegradeMs fall
@@ -37,7 +38,6 @@ type Config struct {
 	StatePath   string
 	SourcesPath string // plain-text sources whitelist (separate from state DB)
 	AssetsDir   string
-	CoreDir     string
 	OutDir      string
 
 	Interval  time.Duration
@@ -65,21 +65,34 @@ type Config struct {
 	// ExcludeProtocols holds scheme strings (vmess/vless/trojan/hysteria2/tuic)
 	// whose nodes are skipped entirely (no probe, never selected).
 	ExcludeProtocols []string
-	// Workers is the probe worker-pool size; each worker owns one xray process.
-	// 0 defaults to 8 (lower = gentler on weak VPS / constrained networks).
+	// Workers is the in-process probe-concurrency semaphore: it bounds
+	// concurrent Latency/Speed calls inside the embedded mihomo engine.
+	// 0 defaults to 32.
 	Workers int
+
+	// SubValidityInterval drives the SubValidity timer: aliveness (latency) of
+	// each subscription member. 0 defaults to 5m.
+	SubValidityInterval time.Duration
+	// SubPingInterval drives the SubPing timer: latency refresh for labels/
+	// ordering of subscription members. 0 defaults to 30m.
+	SubPingInterval time.Duration
+	// SubTopN caps subscription output members per country. 0 defaults to TopN.
+	SubTopN int
+
 	// IsBanned reports whether a node hash is banned and must be excluded from
 	// selection (so it never reaches a subscription). Nil disables banning.
 	IsBanned func(hash string) bool
 }
 
-// ProbeEngine is the subset of the test engine the scheduler depends on. It is
-// an interface (not the concrete type) so tests can supply a fake that records
-// Close without spawning xray or downloading cores. Start launches the worker
-// pool (a no-op for fakes).
+// ProbeEngine is the subset of the embedded mihomo engine the scheduler depends
+// on. It is an interface (not the concrete type) so tests can supply a fake
+// that records Close without spawning the embedded hub or downloading cores.
+// Start launches
+// the embedded hub (a no-op for fakes).
 type ProbeEngine interface {
 	Start()
-	Probe(ctx context.Context, n model.Node) (test.Result, error)
+	SyncNodes(nodes []model.Node) error
+	Probe(ctx context.Context, n model.Node) (mihomo.Result, error)
 	Close() error
 }
 
@@ -152,10 +165,10 @@ type Snapshot struct {
 }
 
 // engineNew and geoNew are the production constructors, kept as package-level
-// vars so tests can swap in offline/no-xray variants before calling New.
+// vars so tests can swap in offline/no-core variants before calling New.
 var (
-	engineNew = func(mgr *core.Manager, st *state.State, opts test.Options) *test.Engine {
-		return test.New(mgr, st, opts)
+	engineNew = func(opts mihomo.Options) *mihomo.Controller {
+		return mihomo.New(opts)
 	}
 	geoNew = geo.New
 )
@@ -164,7 +177,6 @@ var (
 type Scheduler struct {
 	cfg Config
 	st  *state.State
-	mgr *core.Manager
 	reg *config.Registry
 	geo *geo.Manager
 
@@ -175,7 +187,7 @@ type Scheduler struct {
 	// Injectable function fields. Defaults wire the real implementations;
 	// tests replace them with deterministic fakes.
 	FetchFn func(ctx context.Context, src config.Source) ([]model.Node, error)
-	ProbeFn func(ctx context.Context, nodes []model.Node) (map[string]test.Result, error)
+	ProbeFn func(ctx context.Context, nodes []model.Node) (map[string]mihomo.Result, error)
 	GeoFn   func(n model.Node) string
 
 	ctx    context.Context
@@ -188,9 +200,14 @@ type Scheduler struct {
 	cycleCtx    context.Context
 	cycleCancel context.CancelFunc
 
-	ticker  *time.Ticker
-	stopMu  sync.Mutex
-	stopped bool
+	// Three timers, each with its own derived context + WaitGroup so Stop can
+	// wait for all of them cleanly.
+	commonTimer  *time.Ticker
+	validTimer   *time.Ticker
+	pingTimer    *time.Ticker
+	timerWG      sync.WaitGroup
+	stopMu       sync.Mutex
+	stopped      bool
 
 	statusMu sync.RWMutex
 	status   Snapshot
@@ -203,9 +220,9 @@ type Scheduler struct {
 	parseCache map[string][]model.Node
 }
 
-// New builds a Scheduler: it opens state, creates the core manager, the test
-// engine, the geo manager, and the output persister. Defaults: Interval 2h,
-// TopN 5, DegradeMs 0 (only the 2x-median rule is used when 0).
+// New builds a Scheduler: it opens state, creates the embedded mihomo engine,
+// the geo manager, and the output persister. Defaults: Interval 2h, TopN 5,
+// DegradeMs 0 (only the 2x-median rule is used when 0).
 func New(cfg Config) (*Scheduler, error) {
 	if cfg.Interval <= 0 {
 		cfg.Interval = 2 * time.Hour
@@ -220,17 +237,21 @@ func New(cfg Config) (*Scheduler, error) {
 		cfg.CorpseCycles = 5
 	}
 	if cfg.Workers <= 0 {
-		cfg.Workers = 8
+		cfg.Workers = 32
+	}
+	if cfg.SubValidityInterval <= 0 {
+		cfg.SubValidityInterval = 5 * time.Minute
+	}
+	if cfg.SubPingInterval <= 0 {
+		cfg.SubPingInterval = 30 * time.Minute
+	}
+	if cfg.SubTopN <= 0 {
+		cfg.SubTopN = cfg.TopN
 	}
 
 	st, err := state.Open(cfg.StatePath)
 	if err != nil {
 		return nil, fmt.Errorf("scheduler: open state: %w", err)
-	}
-	mgr, err := core.New(cfg.CoreDir)
-	if err != nil {
-		st.Close()
-		return nil, fmt.Errorf("scheduler: core manager: %w", err)
 	}
 	reg, err := config.New(cfg.SourcesPath)
 	if err != nil {
@@ -238,7 +259,7 @@ func New(cfg Config) (*Scheduler, error) {
 		return nil, fmt.Errorf("scheduler: config registry: %w", err)
 	}
 	geoMgr := geoNew(cfg.AssetsDir)
-	engine := engineNew(mgr, st, test.Options{
+	engine := engineNew(mihomo.Options{
 		ProbeURL:      cfg.ProbeURL,
 		SpeedTestURL:  cfg.SpeedTestURL,
 		MinSpeedMbps:  cfg.MinSpeedMbps,
@@ -252,7 +273,6 @@ func New(cfg Config) (*Scheduler, error) {
 	s := &Scheduler{
 		cfg:       cfg,
 		st:        st,
-		mgr:       mgr,
 		reg:       reg,
 		geo:       geoMgr,
 		engine:    engine,
@@ -274,7 +294,7 @@ func New(cfg Config) (*Scheduler, error) {
 }
 
 // SetEngine replaces the probe engine. Tests use it to inject a fake that
-// avoids spawning xray or downloading cores.
+// avoids spawning the embedded hub or downloading cores.
 func (s *Scheduler) SetEngine(e ProbeEngine) {
 	s.engine = e
 }
@@ -282,7 +302,7 @@ func (s *Scheduler) SetEngine(e ProbeEngine) {
 // WithSpeed marks a context for on-demand throughput sampling. The background
 // cycle never calls this, so automatic probes stay latency-only.
 func (s *Scheduler) WithSpeed(ctx context.Context) context.Context {
-	return test.WithSpeed(ctx)
+	return mihomo.WithSpeed(ctx)
 }
 
 // defaultFetch fetches, parses and filters one enabled source into nodes.
@@ -422,9 +442,9 @@ func sourceMetaFrom(fetched []fetch.FetchedSource) state.SourceMeta {
 
 // defaultProbe probes every node through the engine and returns results keyed
 // by node hash.
-func (s *Scheduler) defaultProbe(ctx context.Context, nodes []model.Node) (map[string]test.Result, error) {
+func (s *Scheduler) defaultProbe(ctx context.Context, nodes []model.Node) (map[string]mihomo.Result, error) {
 	s.setStatus(func(st *Snapshot) { st.ProbeTotal = len(nodes); st.ProbeDone = 0 })
-	out := make(map[string]test.Result, len(nodes))
+	out := make(map[string]mihomo.Result, len(nodes))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	for _, n := range nodes {
@@ -474,7 +494,7 @@ func (s *Scheduler) CachedNodes() []model.Node {
 // the results keyed exactly as ProbeFn produces them (no re-keying). It is a
 // thin, exported wrapper so external callers (e.g. a web UI) can reuse the
 // scheduler's probe path without touching internal fields.
-func (s *Scheduler) ProbeNodes(ctx context.Context, nodes []model.Node) (map[string]test.Result, error) {
+func (s *Scheduler) ProbeNodes(ctx context.Context, nodes []model.Node) (map[string]mihomo.Result, error) {
 	return s.ProbeFn(ctx, nodes)
 }
 
@@ -504,11 +524,14 @@ func (s *Scheduler) filterCorpses(nodes []model.Node) []model.Node {
 	return out
 }
 
-// Run executes one Cycle immediately, then repeats on every ticker tick until
-// ctx is cancelled. It always calls Stop on the way out.
+// Run executes one Cycle immediately, then repeats on three independent timers
+// until ctx is cancelled: CommonScan (Interval), SubValidity (SubValidityInterval),
+// and SubPing (SubPingInterval). It always calls Stop on the way out.
 func (s *Scheduler) Run(ctx context.Context) error {
 	s.stopMu.Lock()
-	s.ticker = time.NewTicker(s.cfg.Interval)
+	s.commonTimer = time.NewTicker(s.cfg.Interval)
+	s.validTimer = time.NewTicker(s.cfg.SubValidityInterval)
+	s.pingTimer = time.NewTicker(s.cfg.SubPingInterval)
 	s.stopped = false
 	s.stopMu.Unlock()
 
@@ -529,6 +552,38 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			log.Printf("scheduler: initial cycle failed: %v", err)
 		}
 	}
+
+	// SubValidity timer: aliveness of each subscription member.
+	s.timerWG.Add(1)
+	go func() {
+		defer s.timerWG.Done()
+		for {
+			select {
+			case <-s.ctx.Done():
+				return
+			case <-s.validTimer.C:
+				if err := s.SubValidity(s.ctx); err != nil {
+					log.Printf("scheduler: sub-validity failed: %v", err)
+				}
+			}
+		}
+	}()
+	// SubPing timer: latency refresh for labels/ordering.
+	s.timerWG.Add(1)
+	go func() {
+		defer s.timerWG.Done()
+		for {
+			select {
+			case <-s.ctx.Done():
+				return
+			case <-s.pingTimer.C:
+				if err := s.SubPing(s.ctx); err != nil {
+					log.Printf("scheduler: sub-ping failed: %v", err)
+				}
+			}
+		}
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -541,7 +596,7 @@ func (s *Scheduler) Run(ctx context.Context) error {
 			if err := s.Cycle(ctx); err != nil {
 				log.Printf("scheduler: manual cycle failed: %v", err)
 			}
-		case <-s.ticker.C:
+		case <-s.commonTimer.C:
 			if err := s.Cycle(ctx); err != nil {
 				log.Printf("scheduler: cycle failed: %v", err)
 			}
@@ -809,8 +864,18 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 	selected = applyDegrade(selected, cands, s.cfg.DegradeMs)
 
 	s.setStatus(func(st *Snapshot) { st.Phase = PhasePersist })
-	if err := s.persister.Persist(selected); err != nil {
-		return fmt.Errorf("scheduler: persist: %w", err)
+	// Single writer to out/: regenerateSubs gathers the current subscription
+	// set (which may be empty on first boot) and persists it. The common pool
+	// is internal-only and never written to out/ directly.
+	if err := s.regenerateSubs(); err != nil {
+		return fmt.Errorf("scheduler: regenerate subs: %w", err)
+	}
+
+	// On first boot with an empty subscription, auto-seed from the common pool.
+	if members, _ := s.st.ListSubscription(); len(members) == 0 {
+		if err := s.SeedSubscription(); err != nil {
+			log.Printf("scheduler: seed subscription: %v", err)
+		}
 	}
 
 	log.Printf("scheduler: cycle %d done: %d sources, %d nodes, %d selected",
@@ -825,9 +890,313 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 	return nil
 }
 
+// regenerateSubs is THE ONLY writer to out/. It gathers the alive, non-banned
+// subscription members (optionally capped per country by SubTopN) and persists
+// them through the existing three generators (untouched). Banned members are
+// excluded from the served output.
+func (s *Scheduler) regenerateSubs() error {
+	members, err := s.st.SubscriptionMemberNodes()
+	if err != nil {
+		return fmt.Errorf("subscription members: %w", err)
+	}
+	var cands []selector.Candidate
+	for _, n := range members {
+		h := nodeHash(&n)
+		if s.cfg.IsBanned != nil && s.cfg.IsBanned(h) {
+			continue
+		}
+		// Use the latest stored latency for ordering/labels when available.
+		lat := 0
+		if id, e := s.st.NodeID(h); e == nil {
+			if r, e2 := s.st.LatestResult(id); e2 == nil {
+				lat = r.LatencyMs
+			}
+		}
+		cands = append(cands, selector.Candidate{Node: n, LatencyMs: lat, Country: n.Country})
+	}
+	// Cap per country by SubTopN (best latency first).
+	cands = capPerCountry(cands, s.cfg.SubTopN)
+	nodes := make([]model.Node, 0, len(cands))
+	for _, c := range cands {
+		nodes = append(nodes, c.Node)
+	}
+	if err := s.persister.Persist(nodes); err != nil {
+		return fmt.Errorf("persist subscription: %w", err)
+	}
+	return nil
+}
+
+// RegenerateSubs exposes regenerateSubs for the web layer so a manual
+// add/remove of a subscription member takes effect in out/ immediately.
+func (s *Scheduler) RegenerateSubs() error {
+	return s.regenerateSubs()
+}
+
+// capPerCountry keeps at most topN candidates per country, ordered by latency
+// (lowest first; 0 latency treated as worst).
+func capPerCountry(cands []selector.Candidate, topN int) []selector.Candidate {
+	if topN <= 0 {
+		return cands
+	}
+	byCountry := make(map[string][]selector.Candidate)
+	var order []string
+	for _, c := range cands {
+		k := c.Country
+		if _, ok := byCountry[k]; !ok {
+			order = append(order, k)
+		}
+		byCountry[k] = append(byCountry[k], c)
+	}
+	out := make([]selector.Candidate, 0, len(cands))
+	for _, k := range order {
+		grp := byCountry[k]
+		sort.SliceStable(grp, func(i, j int) bool {
+			if grp[i].LatencyMs == 0 && grp[j].LatencyMs == 0 {
+				return false
+			}
+			if grp[i].LatencyMs == 0 {
+				return false
+			}
+			if grp[j].LatencyMs == 0 {
+				return true
+			}
+			return grp[i].LatencyMs < grp[j].LatencyMs
+		})
+		if len(grp) > topN {
+			grp = grp[:topN]
+		}
+		out = append(out, grp...)
+	}
+	return out
+}
+
+// SeedSubscription populates the subscription from the common pool: for each
+// country, build candidates from common nodes + their latest results latency,
+// select the best per TopN, and add them. It then regenerates out/ immediately
+// so the freshly-seeded subscription is written on first boot (closing the
+// first-boot gap where out/ would otherwise stay empty until the next tick).
+func (s *Scheduler) SeedSubscription() error {
+	common, err := s.st.ListNodes()
+	if err != nil {
+		return fmt.Errorf("list common nodes: %w", err)
+	}
+	byCountry := make(map[string][]selector.Candidate)
+	for _, nr := range common {
+		if !nr.Alive {
+			continue
+		}
+		if s.cfg.IsBanned != nil && s.cfg.IsBanned(nr.Hash) {
+			continue
+		}
+		byCountry[nr.Country] = append(byCountry[nr.Country], selector.Candidate{
+			Node:      model.Node{Protocol: model.Scheme(nr.Protocol), Host: nr.Host, Port: nr.Port, Name: nr.Name, Country: nr.Country, User: nr.Name},
+			LatencyMs: nr.LatencyMs,
+			Country:   nr.Country,
+			Hash:      nr.Hash,
+		})
+	}
+	for _, cands := range byCountry {
+		best := selector.Select(cands, s.cfg.TopN)
+		for _, c := range best {
+			h := c.Hash
+			if err := s.st.AddSubscription(h); err != nil {
+				log.Printf("scheduler: seed add subscription %s: %v", h, err)
+			}
+		}
+	}
+	return s.regenerateSubs()
+}
+
+// SubValidity checks each subscription member's aliveness via mihomo latency and
+// replaces any dead member immediately (ReplaceRoutine). It runs on its own
+// timer context, independent of the common scan.
+func (s *Scheduler) SubValidity(ctx context.Context) error {
+	members, err := s.st.ListSubscription()
+	if err != nil {
+		return fmt.Errorf("list subscription: %w", err)
+	}
+	for _, m := range members {
+		n, e := s.st.NodeByHash(m.NodeID)
+		if e != nil {
+			// Orphaned row (node pruned): drop it.
+			_ = s.st.RemoveSubscription(m.NodeID)
+			continue
+		}
+		res, e := s.engine.Probe(ctx, n)
+		if e != nil {
+			continue
+		}
+		_ = s.st.SetSubValidChecked(m.NodeID, time.Now().Unix())
+		if !res.Alive {
+			if err := s.ReplaceRoutine(m.NodeID); err != nil {
+				log.Printf("scheduler: replace routine %s: %v", m.NodeID, err)
+			}
+		}
+	}
+	return nil
+}
+
+// SubPing refreshes latency for each subscription member and regenerates out/
+// when ordering may have changed. It runs on its own timer context.
+func (s *Scheduler) SubPing(ctx context.Context) error {
+	members, err := s.st.ListSubscription()
+	if err != nil {
+		return fmt.Errorf("list subscription: %w", err)
+	}
+	changed := false
+	for _, m := range members {
+		n, e := s.st.NodeByHash(m.NodeID)
+		if e != nil {
+			_ = s.st.RemoveSubscription(m.NodeID)
+			changed = true
+			continue
+		}
+		res, e := s.engine.Probe(ctx, n)
+		if e != nil {
+			continue
+		}
+		if e := s.st.SetSubPing(m.NodeID, int(res.LatencyMs), time.Now().Unix()); e != nil {
+			log.Printf("scheduler: set sub ping %s: %v", m.NodeID, e)
+		}
+		changed = true
+	}
+	if changed {
+		if err := s.regenerateSubs(); err != nil {
+			return fmt.Errorf("regenerate subs: %w", err)
+		}
+	}
+	return nil
+}
+
+// ReplaceRoutine swaps a dead subscription member for a fresh, same-country
+// common node. It queries common alive, non-banned, same-country nodes (applying
+// ExcludeCountries/ExcludeProtocols), orders by stored latency, takes top-K (5),
+// calls SyncNodes with the FULL current union (never a partial set that would
+// wipe other proxies), fresh-pings each, swaps the first alive in, and
+// regenerates out/ immediately. If none available, it removes the dead member.
+func (s *Scheduler) ReplaceRoutine(deadHash string) error {
+	dead, err := s.st.NodeByHash(deadHash)
+	if err != nil {
+		_ = s.st.RemoveSubscription(deadHash)
+		return nil
+	}
+	cands, err := s.st.CommonAliveSameCountry(dead.Country, s.cfg.ExcludeCountries, s.cfg.ExcludeProtocols)
+	if err != nil {
+		return fmt.Errorf("common same-country: %w", err)
+	}
+	// Order by stored latency (best first).
+	sort.SliceStable(cands, func(i, j int) bool {
+		if cands[i].LatencyMs == 0 && cands[j].LatencyMs == 0 {
+			return false
+		}
+		if cands[i].LatencyMs == 0 {
+			return false
+		}
+		if cands[j].LatencyMs == 0 {
+			return true
+		}
+		return cands[i].LatencyMs < cands[j].LatencyMs
+	})
+	if len(cands) > 5 {
+		cands = cands[:5]
+	}
+
+	// Build the FULL union: common alive ∪ subscription members ∪ candidates,
+	// so SyncNodes never drops a subscription member or other proxy.
+	union, err := s.fullUnion(cands)
+	if err != nil {
+		return fmt.Errorf("full union: %w", err)
+	}
+	if err := s.engine.SyncNodes(union); err != nil {
+		return fmt.Errorf("sync nodes: %w", err)
+	}
+
+	// Fresh-ping each candidate; swap the first alive in.
+	for _, c := range cands {
+		res, e := s.engine.Probe(context.Background(), c.Node)
+		if e != nil {
+			continue
+		}
+		if res.Alive {
+			h := nodeHash(&c.Node)
+			if s.cfg.IsBanned != nil && s.cfg.IsBanned(h) {
+				continue
+			}
+			if err := s.st.AddSubscription(h); err != nil {
+				log.Printf("scheduler: replace add %s: %v", h, err)
+			}
+			_ = s.st.RemoveSubscription(deadHash)
+			if err := s.regenerateSubs(); err != nil {
+				return fmt.Errorf("regenerate subs: %w", err)
+			}
+			return nil
+		}
+	}
+	// None alive: drop the dead member so it is excluded from output.
+	_ = s.st.RemoveSubscription(deadHash)
+	return s.regenerateSubs()
+}
+
+// fullUnion returns the complete node set to hand to SyncNodes: every common
+// alive node, every current subscription member, plus the given candidates.
+// This guarantees subscription ⊆ synced set, so a reload never wipes a member.
+func (s *Scheduler) fullUnion(extra []selector.Candidate) ([]model.Node, error) {
+	seen := make(map[string]bool)
+	var out []model.Node
+	add := func(n model.Node) {
+		h := nodeHash(&n)
+		if seen[h] {
+			return
+		}
+		seen[h] = true
+		out = append(out, n)
+	}
+	common, err := s.st.ListNodes()
+	if err != nil {
+		return nil, err
+	}
+	for _, nr := range common {
+		if !nr.Alive {
+			continue
+		}
+		add(model.Node{Protocol: model.Scheme(nr.Protocol), Host: nr.Host, Port: nr.Port, Name: nr.Name, Country: nr.Country, User: nr.Name})
+	}
+	members, err := s.st.SubscriptionMemberNodes()
+	if err != nil {
+		return nil, err
+	}
+	for _, n := range members {
+		add(n)
+	}
+	for _, c := range extra {
+		add(c.Node)
+	}
+	return out, nil
+}
+
+// SubStatus returns a per-pool status snapshot for the web UI.
+func (s *Scheduler) SubStatus() map[string]any {
+	members, _ := s.st.ListSubscription()
+	alive := 0
+	for _, m := range members {
+		id, err := s.st.NodeID(m.NodeID)
+		if err != nil {
+			continue
+		}
+		if r, err := s.st.LatestResult(id); err == nil && r.Alive {
+			alive++
+		}
+	}
+	return map[string]any{
+		"subscriptionMembers": len(members),
+		"subscriptionAlive":   alive,
+	}
+}
+
 // Stop cleanly shuts the scheduler down: it cancels the internal context,
-// stops the ticker, and closes the test engine (killing any xray subprocess)
-// and the geo manager. It is safe to call multiple times and before Run.
+// stops the three timers, waits for their goroutines, and closes the embedded
+// mihomo engine and the geo manager. It is safe to call multiple times and
+// before Run.
 func (s *Scheduler) Stop() {
 	s.stopMu.Lock()
 	defer s.stopMu.Unlock()
@@ -840,9 +1209,17 @@ func (s *Scheduler) Stop() {
 	if s.cancel != nil {
 		s.cancel()
 	}
-	if s.ticker != nil {
-		s.ticker.Stop()
+	if s.commonTimer != nil {
+		s.commonTimer.Stop()
 	}
+	if s.validTimer != nil {
+		s.validTimer.Stop()
+	}
+	if s.pingTimer != nil {
+		s.pingTimer.Stop()
+	}
+	// Wait for the SubValidity/SubPing goroutines to observe ctx cancellation.
+	s.timerWG.Wait()
 	if s.engine != nil {
 		_ = s.engine.Close()
 	}

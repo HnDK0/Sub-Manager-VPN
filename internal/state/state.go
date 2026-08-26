@@ -34,9 +34,11 @@ type Source struct {
 // consumers (e.g. the TUI) that only need strings and a latest status.
 type NodeRow struct {
 	ID            int64
+	Hash          string
 	Name          string
 	NormName      string
 	Host          string
+	Port          int
 	Country       string
 	Protocol      string
 	Alive         bool
@@ -131,6 +133,16 @@ var migrations = []string{
 		last_modified TEXT NOT NULL DEFAULT '',
 		body_sha TEXT NOT NULL DEFAULT '',
 		updated_at INTEGER NOT NULL
+	)`,
+	// subscription is the curated pool: a subset of common nodes (by node hash)
+	// that is served to out/. It is independent of the common pool — the common
+	// pool is internal-only and never written to out/ directly.
+	`CREATE TABLE IF NOT EXISTS subscription(
+		node_id TEXT PRIMARY KEY,
+		added_at INTEGER NOT NULL,
+		valid_checked_at INTEGER NOT NULL DEFAULT 0,
+		ping_latency_ms INTEGER NOT NULL DEFAULT 0,
+		ping_checked_at INTEGER NOT NULL DEFAULT 0
 	)`,
 }
 
@@ -331,7 +343,7 @@ func (s *State) ListSources() ([]Source, error) {
 // LastSeenCycle=0. Used by the TUI status screen.
 func (s *State) ListNodes() ([]NodeRow, error) {
 	const q = `
-		SELECT n.id, n.name, n.norm_name, n.host, n.country, n.protocol,
+		SELECT n.id, n.hash, n.name, n.norm_name, n.host, n.port, n.country, n.protocol,
 		       COALESCE(r.alive, 0), COALESCE(r.latency_ms, 0), COALESCE(r.speed_kbps, 0), COALESCE(r.cycle_id, 0)
 		FROM nodes n
 		LEFT JOIN (
@@ -349,9 +361,11 @@ func (s *State) ListNodes() ([]NodeRow, error) {
 	for rows.Next() {
 		var (
 			id       int64
+			hash     string
 			name     string
 			normName string
 			host     string
+			port     int
 			country  string
 			proto    string
 			alive    int
@@ -359,14 +373,16 @@ func (s *State) ListNodes() ([]NodeRow, error) {
 			speed    int
 			cycle    int
 		)
-		if err := rows.Scan(&id, &name, &normName, &host, &country, &proto, &alive, &latency, &speed, &cycle); err != nil {
+		if err := rows.Scan(&id, &hash, &name, &normName, &host, &port, &country, &proto, &alive, &latency, &speed, &cycle); err != nil {
 			return nil, fmt.Errorf("scan node row: %w", err)
 		}
 		out = append(out, NodeRow{
 			ID:            id,
+			Hash:          hash,
 			Name:          name,
 			NormName:      normName,
 			Host:          host,
+			Port:          port,
 			Country:       country,
 			Protocol:      proto,
 			Alive:         alive != 0,
@@ -601,6 +617,12 @@ func (s *State) Prune(cfg Retention, currentCycle int) error {
 		}
 	}
 
+	// Drop subscription rows whose node no longer exists (e.g. pruned above),
+	// so the curated pool stays consistent with the common pool.
+	if _, err := s.PruneOrphanSubs(); err != nil {
+		return fmt.Errorf("prune orphan subs: %w", err)
+	}
+
 	return nil
 }
 
@@ -679,6 +701,240 @@ func (s *State) deadNodeIDs(deadCycles int) ([]int64, error) {
 		}
 	}
 	return dead, nil
+}
+
+// NodeByHash returns the model.Node for a node hash, or an error if none
+// exists. Used by the subscription routines to resolve a member hash to a node
+// for probing/replacement (the engine.Probe path needs a model.Node).
+func (s *State) NodeByHash(hash string) (model.Node, error) {
+	const q = `
+		SELECT n.hash, n.name, n.host, n.port, n.country, n.protocol, n.source
+		FROM nodes n
+		WHERE n.hash = ?`
+	var (
+		h       string
+		name    string
+		host    string
+		port    int
+		country string
+		proto   string
+		source  string
+	)
+	if err := s.db.QueryRow(q, hash).Scan(&h, &name, &host, &port, &country, &proto, &source); err != nil {
+		return model.Node{}, fmt.Errorf("node by hash: %w", err)
+	}
+	return model.Node{
+		Protocol: model.Scheme(proto),
+		Host:     host,
+		Port:     port,
+		Name:     name,
+		Country:  country,
+		Source:   source,
+		User:     name,
+	}, nil
+}
+
+// LatestResult returns the most recent results row for a node id, or an error
+// if none exists. Used by the scheduler to seed latency labels for ordering.
+func (s *State) LatestResult(nodeID int64) (ResultRow, error) {
+	const q = `
+		SELECT alive, latency_ms, speed_kbps, cycle_id
+		FROM results WHERE node_id = ?
+		ORDER BY cycle_id DESC, checked_at DESC LIMIT 1`
+	var r ResultRow
+	var alive int
+	if err := s.db.QueryRow(q, nodeID).Scan(&alive, &r.LatencyMs, &r.SpeedKbps, &r.CycleID); err != nil {
+		return ResultRow{}, fmt.Errorf("latest result: %w", err)
+	}
+	r.Alive = alive != 0
+	return r, nil
+}
+
+// ResultRow is a single liveness result (used by LatestResult).
+type ResultRow struct {
+	Alive     bool
+	LatencyMs int
+	SpeedKbps int
+	CycleID   int
+}
+
+// CommonAliveSameCountry returns alive common-pool nodes in the given country,
+// excluding any country in excludeCountries and any protocol in excludeProtocols.
+// Used by ReplaceRoutine to find a same-country replacement for a dead member.
+func (s *State) CommonAliveSameCountry(country string, excludeCountries, excludeProtocols []string) ([]selector.Candidate, error) {
+	const q = `
+		SELECT n.hash, n.name, n.norm_name, n.host, n.port, n.country, n.protocol,
+		       COALESCE(r.latency_ms, 0)
+		FROM nodes n
+		LEFT JOIN (
+			SELECT node_id, alive, latency_ms,
+			       ROW_NUMBER() OVER (PARTITION BY node_id ORDER BY cycle_id DESC, checked_at DESC) AS rn
+			FROM results
+		) r ON r.node_id = n.id AND r.rn = 1
+		WHERE n.country = ? AND COALESCE(r.alive, 0) = 1`
+	rows, err := s.db.Query(q, country)
+	if err != nil {
+		return nil, fmt.Errorf("common same-country: %w", err)
+	}
+	defer rows.Close()
+	exC := make(map[string]bool)
+	for _, c := range excludeCountries {
+		exC[c] = true
+	}
+	exP := make(map[string]bool)
+	for _, p := range excludeProtocols {
+		exP[p] = true
+	}
+	var out []selector.Candidate
+	for rows.Next() {
+		var (
+			hash    string
+			name    string
+			norm    string
+			host    string
+			port    int
+			country string
+			proto   string
+			latency int
+		)
+		if err := rows.Scan(&hash, &name, &norm, &host, &port, &country, &proto, &latency); err != nil {
+			return nil, fmt.Errorf("scan common: %w", err)
+		}
+		if exC[country] || exP[proto] {
+			continue
+		}
+		out = append(out, selector.Candidate{
+			Node: model.Node{
+				Protocol: model.Scheme(proto),
+				Host:     host,
+				Port:     port,
+				Name:     name,
+				Country:  country,
+				User:     name,
+			},
+			LatencyMs: latency,
+			Country:   country,
+		})
+	}
+	return out, rows.Err()
+}
+
+// SubscriptionMemberNodes returns the full model.Node for every current
+// subscription member (joined from nodes). Used by regenerateSubs to build the
+// served output.
+func (s *State) SubscriptionMemberNodes() ([]model.Node, error) {
+	const q = `
+		SELECT n.hash, n.name, n.host, n.port, n.country, n.protocol, n.source
+		FROM subscription sub
+		JOIN nodes n ON n.hash = sub.node_id
+		ORDER BY sub.added_at`
+	rows, err := s.db.Query(q)
+	if err != nil {
+		return nil, fmt.Errorf("subscription members: %w", err)
+	}
+	defer rows.Close()
+	var out []model.Node
+	for rows.Next() {
+		var (
+			hash    string
+			name    string
+			host    string
+			port    int
+			country string
+			proto   string
+			source  string
+		)
+		if err := rows.Scan(&hash, &name, &host, &port, &country, &proto, &source); err != nil {
+			return nil, fmt.Errorf("scan member: %w", err)
+		}
+		out = append(out, model.Node{
+			Protocol: model.Scheme(proto),
+			Host:     host,
+			Port:     port,
+			Name:     name,
+			Country:  country,
+			Source:   source,
+			User:     name,
+		})
+	}
+	return out, rows.Err()
+}
+
+// SubscriptionRow is a subscription table row (for listing/status).
+type SubscriptionRow struct {
+	NodeID         string
+	AddedAt        int64
+	ValidCheckedAt int64
+	PingLatencyMs  int
+	PingCheckedAt  int64
+}
+
+// ListSubscription returns all subscription rows.
+func (s *State) ListSubscription() ([]SubscriptionRow, error) {
+	rows, err := s.db.Query(`SELECT node_id, added_at, valid_checked_at, ping_latency_ms, ping_checked_at FROM subscription ORDER BY added_at`)
+	if err != nil {
+		return nil, fmt.Errorf("list subscription: %w", err)
+	}
+	defer rows.Close()
+	var out []SubscriptionRow
+	for rows.Next() {
+		var r SubscriptionRow
+		if err := rows.Scan(&r.NodeID, &r.AddedAt, &r.ValidCheckedAt, &r.PingLatencyMs, &r.PingCheckedAt); err != nil {
+			return nil, fmt.Errorf("scan subscription: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// AddSubscription adds a node hash to the subscription pool (idempotent).
+func (s *State) AddSubscription(nodeHash string) error {
+	if _, err := s.db.Exec(
+		`INSERT INTO subscription(node_id, added_at) VALUES(?, ?)
+		 ON CONFLICT(node_id) DO NOTHING`,
+		nodeHash, time.Now().Unix(),
+	); err != nil {
+		return fmt.Errorf("add subscription: %w", err)
+	}
+	return nil
+}
+
+// RemoveSubscription removes a node hash from the subscription pool (idempotent).
+func (s *State) RemoveSubscription(nodeHash string) error {
+	if _, err := s.db.Exec(`DELETE FROM subscription WHERE node_id = ?`, nodeHash); err != nil {
+		return fmt.Errorf("remove subscription: %w", err)
+	}
+	return nil
+}
+
+// SetSubValidChecked records the last aliveness check time for a member.
+func (s *State) SetSubValidChecked(nodeHash string, ts int64) error {
+	if _, err := s.db.Exec(`UPDATE subscription SET valid_checked_at = ? WHERE node_id = ?`, ts, nodeHash); err != nil {
+		return fmt.Errorf("set sub valid: %w", err)
+	}
+	return nil
+}
+
+// SetSubPing records the latest latency sample for a member.
+func (s *State) SetSubPing(nodeHash string, latencyMs int, ts int64) error {
+	if _, err := s.db.Exec(`UPDATE subscription SET ping_latency_ms = ?, ping_checked_at = ? WHERE node_id = ?`, latencyMs, ts, nodeHash); err != nil {
+		return fmt.Errorf("set sub ping: %w", err)
+	}
+	return nil
+}
+
+// PruneOrphanSubs removes subscription rows whose node no longer exists (e.g.
+// the node was pruned by retention). Keeps the subscription pool bounded and
+// consistent with the common pool.
+func (s *State) PruneOrphanSubs() (int, error) {
+	res, err := s.db.Exec(`
+		DELETE FROM subscription
+		WHERE NOT EXISTS (SELECT 1 FROM nodes WHERE nodes.hash = subscription.node_id)`)
+	if err != nil {
+		return 0, fmt.Errorf("prune orphan subs: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }
 
 func boolToInt(b bool) int {

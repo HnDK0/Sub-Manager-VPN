@@ -1,8 +1,9 @@
 // Command f3check validates the real-data ingestion path (fetch -> parse ->
 // filter -> dedup) against the user's whitelisted sources. It does NOT ping
-// (xray auto-download is blocked on this sandbox's GitHub API), so it proves the
-// network/protocol stages handle real subscriptions. The live ping + generate
-// step must run on the user's Linux host where xray can be downloaded.
+// (probing uses the embedded mihomo hub and needs real egress to tunnel through
+// a node), so it proves the network/protocol stages handle real subscriptions.
+// The live ping + generate step must run on the user's Linux host with egress
+// to the node IPs.
 package main
 
 import (

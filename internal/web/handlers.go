@@ -111,6 +111,7 @@ func (s *Server) buildStatus() map[string]any {
 			"countries": len(countries),
 		},
 		"sources": len(sources),
+		"subscription": s.sch.SubStatus(),
 	}
 }
 
@@ -289,6 +290,23 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 		writeJSONErrorLog(w, http.StatusInternalServerError, "failed to list nodes", err)
 		return
 	}
+	pool := strings.TrimSpace(r.URL.Query().Get("pool"))
+	if pool == "subscription" {
+		// Restrict to current subscription members (preserving NodeView fields).
+		subs, err := s.st.ListSubscription()
+		if err != nil {
+			writeJSONErrorLog(w, http.StatusInternalServerError, "subscription list", err)
+			return
+		}
+		inSub := make(map[string]struct{}, len(subs))
+		for _, r := range subs {
+			inSub[r.NodeID] = struct{}{}
+		}
+		views = filterNodeViews(views, func(v NodeView) bool {
+			_, ok := inSub[v.Hash]
+			return ok
+		})
+	}
 	country := strings.TrimSpace(r.URL.Query().Get("country"))
 	alive := strings.TrimSpace(r.URL.Query().Get("alive"))
 	working := strings.TrimSpace(r.URL.Query().Get("working"))
@@ -462,12 +480,108 @@ func (s *Server) handleSubscription(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
+// handleSubAdd adds a node (by hash) to the subscription pool and regenerates
+// out/ immediately so the change is served without waiting for the next tick.
+func (s *Server) handleSubAdd(w http.ResponseWriter, r *http.Request) {
+	hash := strings.TrimSpace(r.URL.Query().Get("hash"))
+	if hash == "" {
+		var body struct {
+			Hash string `json:"hash"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+			hash = strings.TrimSpace(body.Hash)
+		}
+	}
+	if hash == "" {
+		writeJSONError(w, http.StatusBadRequest, "hash required")
+		return
+	}
+	if err := s.st.AddSubscription(hash); err != nil {
+		writeJSONErrorLog(w, http.StatusInternalServerError, "failed to add subscription", err)
+		return
+	}
+	if err := s.sch.RegenerateSubs(); err != nil {
+		log.Printf("web: regenerate after add: %v", err)
+	}
+	if views, err := s.nodeViews(); err == nil {
+		s.hub.Publish(Event{Type: "nodes", Payload: views})
+	}
+	writeJSON(w, map[string]any{"added": hash, "ok": true})
+}
+
+// handleSubRemove removes a node (by hash) from the subscription pool and
+// regenerates out/ immediately.
+func (s *Server) handleSubRemove(w http.ResponseWriter, r *http.Request) {
+	hash := r.PathValue("hash")
+	if hash == "" {
+		writeJSONError(w, http.StatusBadRequest, "hash required")
+		return
+	}
+	if err := s.st.RemoveSubscription(hash); err != nil {
+		writeJSONErrorLog(w, http.StatusInternalServerError, "failed to remove subscription", err)
+		return
+	}
+	if err := s.sch.RegenerateSubs(); err != nil {
+		log.Printf("web: regenerate after remove: %v", err)
+	}
+	if views, err := s.nodeViews(); err == nil {
+		s.hub.Publish(Event{Type: "nodes", Payload: views})
+	}
+	writeJSON(w, map[string]any{"removed": hash, "ok": true})
+}
+
+// handleSubList returns the current subscription members with their display
+// fields and per-member check timestamps.
+func (s *Server) handleSubList(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.st.ListSubscription()
+	if err != nil {
+		writeJSONErrorLog(w, http.StatusInternalServerError, "list subscription", err)
+		return
+	}
+	views, err := s.nodeViews()
+	if err != nil {
+		writeJSONErrorLog(w, http.StatusInternalServerError, "node views", err)
+		return
+	}
+	viewByHash := make(map[string]NodeView, len(views))
+	for _, v := range views {
+		viewByHash[v.Hash] = v
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		v := viewByHash[row.NodeID]
+		out = append(out, map[string]any{
+			"hash":          row.NodeID,
+			"name":          v.Name,
+			"country":       v.Country,
+			"protocol":      v.Protocol,
+			"alive":         v.Alive,
+			"latencyMs":     v.LatencyMs,
+			"speedKbps":     v.SpeedKbps,
+			"validCheckedAt":  row.ValidCheckedAt,
+			"pingLatencyMs":   row.PingLatencyMs,
+			"pingCheckedAt":   row.PingCheckedAt,
+		})
+	}
+	writeJSON(w, map[string]any{"members": out, "total": len(out)})
+}
+
 // handleCountries returns a clean, deduplicated distinct-country list for the
 // country filter. Empty and "XX" (geo fallback) codes are folded into a single
 // unknown bucket so the UI never shows raw junk.
 func (s *Server) handleCountries(w http.ResponseWriter, r *http.Request) {
 	db := s.st.DB()
-	rows, err := db.Query(`SELECT country, COUNT(*) FROM nodes GROUP BY country ORDER BY country`)
+	pool := strings.TrimSpace(r.URL.Query().Get("pool"))
+	var q string
+	if pool == "subscription" {
+		q = `
+			SELECT n.country, COUNT(*) FROM nodes n
+			JOIN subscription sub ON sub.node_id = n.hash
+			GROUP BY n.country ORDER BY n.country`
+	} else {
+		q = `SELECT country, COUNT(*) FROM nodes GROUP BY country ORDER BY country`
+	}
+	rows, err := db.Query(q)
 	if err != nil {
 		writeJSONErrorLog(w, http.StatusInternalServerError, "list countries", err)
 		return

@@ -20,7 +20,30 @@ func (s *Server) handleTestNodes(w http.ResponseWriter, r *http.Request) {
 		writeJSONErrorLog(w, http.StatusBadRequest, "bad request", err)
 		return
 	}
-	cached := s.sch.CachedNodes()
+	pool := strings.TrimSpace(r.URL.Query().Get("pool"))
+	var cached []model.Node
+	if pool == "subscription" {
+		// Intersect the in-memory cached nodes (which carry the real User field
+		// the hash is computed from) with the subscription set, keyed by the
+		// stored node_id hash from ListSubscription.
+		subs, e := s.st.ListSubscription()
+		if e != nil {
+			writeJSONErrorLog(w, http.StatusInternalServerError, "subscription list", e)
+			return
+		}
+		set := make(map[string]struct{}, len(subs))
+		for _, r := range subs {
+			set[r.NodeID] = struct{}{}
+		}
+		all := s.sch.CachedNodes()
+		for _, n := range all {
+			if _, ok := set[hashNode(n)]; ok {
+				cached = append(cached, n)
+			}
+		}
+	} else {
+		cached = s.sch.CachedNodes()
+	}
 	if len(cached) == 0 {
 		writeJSONError(w, http.StatusConflict, "run a cycle first")
 		return
@@ -240,7 +263,7 @@ func ensureTrailingSlash(p string) string {
 }
 
 // settingsRestartNote documents that most params apply only after a restart.
-const settingsRestartNote = "scheduler/web params persist to config.json; restart the service for interval/topn/degrade/minkeep/corpse and web-addr/secret/token to take effect."
+const settingsRestartNote = "scheduler/web params persist to config.json; restart the service for interval/topn/sub_validity/sub_ping/sub_topn/degrade/minkeep/corpse and web-addr/secret/token to take effect."
 
 // handleGetSettings returns the current persisted settings (read-write now) plus
 // a note that most params require a restart to take effect.

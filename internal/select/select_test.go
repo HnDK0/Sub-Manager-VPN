@@ -76,10 +76,10 @@ func TestSelectTopNPerCountry(t *testing.T) {
 	// US nodes must be the 5 lowest-latency (10..50), never the 60/70 ones.
 	usCount := 0
 	for _, n := range got {
-		if n.Host == "us" {
+		if n.Node.Host == "us" {
 			usCount++
-			if n.Port > 1004 { // ports 1005,1006 are 60/70ms -> must be excluded
-				t.Errorf("high-latency US node selected: port %d", n.Port)
+			if n.Node.Port > 1004 { // ports 1005,1006 are 60/70ms -> must be excluded
+				t.Errorf("high-latency US node selected: port %d", n.Node.Port)
 			}
 		}
 	}

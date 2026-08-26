@@ -656,11 +656,19 @@ async function loadPublish() {
 
 // ── Settings ────────────────────────────────────────────────────────
 const SETTINGS_FIELDS = [
-  { key: "interval", label: "Interval", type: "text", note: "e.g. 30m, 1h — scheduler cycle interval" },
-  { key: "topn", label: "Top N", type: "number", note: "best nodes per country (3–500)", max: 500 },
+  { key: "interval", label: "Interval", type: "text", note: "e.g. 30m, 1h — common scan (refresh of the whole node pool) interval" },
+  { key: "topn", label: "Top N", type: "number", note: "best nodes per country for the common pool (3–500)", max: 500 },
+  { key: "sub_validity_interval", label: "Subscription Validity Interval", type: "text", note: "e.g. 5m — how often subscription members are re-checked for liveness" },
+  { key: "sub_ping_interval", label: "Subscription Ping Interval", type: "text", note: "e.g. 30m — how often subscription members' latency is refreshed" },
+  { key: "sub_topn", label: "Subscription Top N", type: "number", note: "subscription nodes per country (0 = use Top N)" },
   { key: "degrade_ms", label: "Degrade Threshold (ms)", type: "number", note: "0 = median-based auto" },
   { key: "minkeep", label: "Min Keep", type: "number", note: "minimum subscription versions kept" },
   { key: "corpse_cycles", label: "Corpse Cycles", type: "number", note: "consecutive dead cycles before skipping (0 = disabled)" },
+  { key: "workers", label: "Workers", type: "number", note: "concurrent probe goroutines for the embedded mihomo engine (default 32)" },
+  { key: "probe_url", label: "Probe URL", type: "text", note: "URL used for latency/delay checks (e.g. http://www.gstatic.com/generate_204)" },
+  { key: "speed_test_url", label: "Speed Test URL", type: "text", note: "URL used for manual speed tests (large download)" },
+  { key: "min_speed_mbps", label: "Min Speed (Mbps)", type: "number", note: "minimum speed to keep a node in manual speed tests" },
+  { key: "speed_test_topn", label: "Speed Test Top N", type: "number", note: "top N by speed after a manual speed test" },
   { key: "serve_addr", label: "Serve Address", type: "text", note: "subscription HTTP server listen addr (e.g. 127.0.0.1:18080, empty = off)" },
   { key: "serve_token", label: "Serve Token", type: "text", note: "secret path token for subscription server" },
   { key: "web_addr", label: "Web Address", type: "text", note: "admin UI listen address" },
@@ -670,10 +678,8 @@ const SETTINGS_FIELDS = [
   { key: "sources_path", label: "Sources Path", type: "text", note: "path to sources whitelist file", readonly: true },
   { key: "assets_dir", label: "Assets Dir", type: "text", note: "GeoIP mmdb directory", readonly: true },
   { key: "out_dir", label: "Output Dir", type: "text", note: "generated subscriptions directory", readonly: true },
-  { key: "cores_dir", label: "Cores Dir", type: "text", note: "xray/sing-box binaries directory", readonly: true },
   { key: "exclude_countries", label: "Exclude Countries", type: "countries", note: "comma-separated ISO codes to exclude from subscriptions (e.g. ru,cn)" },
   { key: "exclude_protocols", label: "Exclude Protocols", type: "protocols", note: "protocols to skip probing entirely (e.g. vmess,tuic)" },
-  { key: "workers", label: "Workers", type: "number", note: "probe worker-pool size (each owns one xray process); lower = gentler on weak VPS/network (default 4)" },
 ];
 
 async function loadSettings() {

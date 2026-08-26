@@ -4,18 +4,18 @@ Personal, 24/7 **free-VPN subscription manager** written in Go. Single static bi
 
 It fetches **only** the GitHub sources the user whitelists, parses/dedups them,
 drops broken, unsupported, unencrypted, and malicious nodes, pings every candidate
-3× through a real **xray-core** subprocess (16–32 concurrent workers), keeps the
+3× through the embedded **mihomo** engine (16–32 concurrent workers), keeps the
 3–5 best per country by latency, and emits subscriptions for
 **sing-box**, **v2rayN/xray**, and **Clash.Meta**. A long-lived in-process scheduler
 auto-refreshes (replacing dead/degraded nodes), and a **web management UI**
-(package `internal/web`) manages sources and shows status. Cores are
-auto-downloaded from official repos and SHA-verified.
+ (package `internal/web`) manages sources and shows status. The mihomo engine is
+ embedded (a direct Go-module dependency), so no core binary is downloaded or SHA-verified.
 
 > **Язык общения: русский.** Весь диалог с пользователем всегда ведётся на русском языке.
 
 > **Target platform: Ubuntu 22+ (Linux).** Windows/macOS are dev-only; tests run on
 > Linux (or an Ubuntu VM). The code is cross-platform — the only OS-specific bit is
-> the `.exe` suffix on core binaries.
+> the `.exe` suffix (engine is embedded, so no separate core binary).
 
 ---
 
@@ -25,39 +25,38 @@ auto-downloaded from official repos and SHA-verified.
 user whitelist (config)
    │
    ▼
-fetch ──► parse ──► filter ──► test (ping via xray-core/sing-box) ──► select ──► generate (3 formats)
+fetch ──► parse ──► filter ──► test (ping via embedded mihomo) ──► select ──► generate (3 formats)
    │                                                                              │
    └──────────────────────── state (SQLite) ◄── scheduler (24/7 ticker) ◄────────┘
                                               │
-                                          core (binary mgr) + geo (mmdb)
+                                           mihomo (embedded) + geo (mmdb)
 ```
 
 | Stage | Package | Notes |
 |---|---|---|
 | model | `internal/model` | `Node` + scheme enum (vmess/vless/trojan/hysteria2/tuic kept; ss/wireguard/obfs removed; ssr/snell excluded) |
 | config | `internal/config` | user source whitelist (plain-text file registry; deliberate choice to avoid SQLITE_BUSY lock contention). No source fetched unless added + enabled |
-| core | `internal/core` | auto-download latest **STABLE** xray-core (+optional sing-box) from GitHub Releases, verify SHA256 |
 | state | `internal/state` | SQLite (pure-Go `modernc.org/sqlite`); bounded retention on `results`/`history`/`nodes` |
 | fetch | `internal/fetch` | resolve repo/tree → raw; fetch raw; https-only in; GitHub API host required for tree form |
 | parse | `internal/parse` | base64 subs + all URI schemes + Clash YAML + sing-box JSON → `Node` |
 | filter | `internal/filter` | dedup; drop broken; drop unsupported schemes (SS/WireGuard); drop unencrypted/insecure; malware heuristics (scoped to `Node.Extra`) |
-| test | `internal/test` | ping engine: per-worker ephemeral SOCKS5 port, real xray/sing-box subprocess, 3 probes, hard timeout, reaper |
+| test | `internal/mihomo` | ping engine: embedded mihomo hub, per-worker ephemeral SOCKS5/mixed port, 3 probes, hard timeout, reaper |
 | geo | `internal/geo` | `GeoLite2-Country.mmdb` from `sapics/ip-location-db` (one-time download, offline lookup); fallback to `#fragment` name |
 | select | `internal/select` | per-country top-3-5 by latency; emit sing-box JSON + v2rayN base64 + Clash.Meta YAML |
 | scheduler | `internal/scheduler` | in-process `time.Ticker`; degrade detection + swap; history-based corpse skip (skip re-ping of nodes dead `CorpseCycles` consecutive cycles, default 5); guards against overwriting good subs on empty cycles |
 | web | `internal/web` | web management UI (vanilla-JS SPA + REST API + SSE), reached at `http://<web-addr>/<web-secret>/`; the old bubbletea TUI (`internal/tui`) was removed |
 
 Main entry: `main.go` (wires components, starts scheduler goroutine + web management
-server, graceful SIGINT/SIGTERM shutdown that kills all xray/sing-box procs).
+server, graceful SIGINT/SIGTERM shutdown that stops the embedded mihomo hub).
 
 ## Key decisions
 
 - **Go**, single static binary. No cgo (pure-Go SQLite).
-- **xray-core ping engine** only. Shadowsocks, WireGuard, and obfs-SS are removed
+- **embedded mihomo ping engine** only. Shadowsocks, WireGuard, and obfs-SS are removed
   by the `DropUnsupported` filter pass, so no sing-box/SS path is needed.
 - **User source whitelist only** — no shipped/hardcoded source list. The manager fetches
   only what the user adds and enables.
-- **Cores auto-downloaded latest STABLE + SHA256-verified** from official GitHub Releases.
+- **mihomo embedded** as a direct Go-module dependency — no runtime core download or SHA256 verification.
 - **GeoIP** from `sapics/ip-location-db` free `GeoLite2-Country.mmdb`, downloaded once, offline afterward.
 - **SQLite state with bounded retention** so the DB grows only boundedly over 24/7 operation.
 
@@ -67,7 +66,7 @@ server, graceful SIGINT/SIGTERM shutdown that kills all xray/sing-box procs).
 - **Generators emit ONLY explicit known `Node` fields and DROP `Node.Extra`/`Node.Raw`**,
   building dedicated output structs/URIs rather than marshalling `Node` — a dangerous key
   can never leak to the user's subscription.
-- **Generated xray/sing-box test config** is built solely from known `Node` fields (no `Extra`,
+- **Generated mihomo test config** is built solely from known `Node` fields (no `Extra`,
   no `route`/`plugin`/`outbound-hijack` injection from untrusted content).
 - **Egress isolation (cross-platform enforced)**: the test config's ONLY outbound is the
   candidate node; host traffic never enters a node (config inspection: no host routing).
@@ -107,10 +106,9 @@ make test-race  # go test -race ./...
 make run        # go run .
 ```
 
-- **Integration test** (`internal/integration`, `TestEngineSmokeNoXray`) exercises the full
-  worker pool + probe + persist path through an in-process fake SOCKS5 — no xray/network needed.
-  The real-xray path (`TestIntegrationRealXray`) downloads xray and skips cleanly when network/
-  download is unavailable.
+- **Integration test** (`internal/integration`, `TestIntegrationRealMihomo`) starts the embedded
+  mihomo hub, syncs a node, and probes it through an in-process SOCKS5 — no external binary or network
+  download needed. It skips cleanly when there is no real egress to tunnel through the node.
 - **sing-box check**: when the `sing-box` binary is present, generated sing-box output is
   validated; otherwise that check is skipped.
 
@@ -126,5 +124,5 @@ working subscription (`MinKeep` floor; previous files kept on empty result).
 ## Scope (Must-NOT-Have)
 
 No hardcoded source list · no multi-user/server/auth/web API · no payment · no GUI (web UI only; the old bubbletea TUI was removed) ·
-no non-xray tester (sing-box path removed with SS) · no Docker/orchestration beyond the binary
+no external core binary (sing-box path removed with SS) · no Docker/orchestration beyond the binary
 + a systemd unit example.

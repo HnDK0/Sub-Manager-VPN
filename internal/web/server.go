@@ -142,6 +142,9 @@ func (s *Server) Start(ctx context.Context) error {
 	s.mux.HandleFunc("GET "+p+"/api/pipeline", s.auth(s.handlePipeline))
 	s.mux.HandleFunc("GET "+p+"/api/generate", s.auth(s.handleGenerate))
 	s.mux.HandleFunc("GET "+p+"/api/subscription", s.auth(s.handleSubscription))
+	s.mux.HandleFunc("POST "+p+"/api/subscription/add", s.auth(s.handleSubAdd))
+	s.mux.HandleFunc("DELETE "+p+"/api/subscription/{hash}", s.auth(s.handleSubRemove))
+	s.mux.HandleFunc("GET "+p+"/api/subscription/list", s.auth(s.handleSubList))
 	s.mux.HandleFunc("GET "+p+"/api/publish", s.auth(s.handlePublish))
 	s.mux.HandleFunc("GET "+p+"/api/settings", s.auth(s.handleGetSettings))
 	s.mux.HandleFunc("PUT "+p+"/api/settings", s.auth(s.handlePutSettings))
@@ -199,10 +202,11 @@ func (s *Server) poll(ctx context.Context) {
 		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
-			snap := s.sch.Status()
-			key := fmt.Sprintf("%v|%d|%v|%d|%d|%d|%d|%d|%d|%d",
-				snap.Phase, snap.Cycle, snap.Running, snap.SourceTotal, snap.SourceDone,
-				snap.NodesFetched, snap.NodesAlive, snap.Kept, snap.ProbeTotal, snap.ProbeDone)
+		snap := s.sch.Status()
+		subs, _ := s.st.ListSubscription()
+		key := fmt.Sprintf("%v|%d|%v|%d|%d|%d|%d|%d|%d|%d|%d",
+			snap.Phase, snap.Cycle, snap.Running, snap.SourceTotal, snap.SourceDone,
+			snap.NodesFetched, snap.NodesAlive, snap.Kept, snap.ProbeTotal, snap.ProbeDone, len(subs))
 			if key != lastStatus {
 				lastStatus = key
 				s.hub.Publish(Event{Type: "status", Payload: s.buildStatus()})

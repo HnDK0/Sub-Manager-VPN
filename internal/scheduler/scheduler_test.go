@@ -12,35 +12,39 @@ import (
 	"time"
 
 	"vpn-sub-manager/internal/config"
-	"vpn-sub-manager/internal/core"
 	"vpn-sub-manager/internal/geo"
+	"vpn-sub-manager/internal/mihomo"
 	"vpn-sub-manager/internal/model"
 	selector "vpn-sub-manager/internal/select"
-	"vpn-sub-manager/internal/state"
-	"vpn-sub-manager/internal/test"
 )
 
-// TestMain swaps the production engine/geo constructors for offline, no-xray
-// variants so the whole package runs without network or subprocesses.
+// TestMain swaps the production geo constructor for an offline variant so the
+// whole package runs without network. The probe engine is injected per-test via
+// SetEngine (a fake that records Close), so no mihomo subprocess is spawned.
 func TestMain(m *testing.M) {
-	engineNew = func(mgr *core.Manager, st *state.State, opts test.Options) *test.Engine {
-		return test.New(mgr, st, opts)
-	}
 	geoNew = func(string) *geo.Manager { return &geo.Manager{} }
 	os.Exit(m.Run())
 }
 
 // fakeEngine records Close so tests can assert the scheduler tears it down.
 type fakeEngine struct {
-	mu     sync.Mutex
-	closed bool
+	mu       sync.Mutex
+	closed   bool
+	lastSync []model.Node
 }
 
-func (f *fakeEngine) Probe(ctx context.Context, n model.Node) (test.Result, error) {
-	return test.Result{}, nil
+func (f *fakeEngine) Probe(ctx context.Context, n model.Node) (mihomo.Result, error) {
+	return mihomo.Result{}, nil
 }
 
 func (f *fakeEngine) Start() {}
+
+func (f *fakeEngine) SyncNodes(nodes []model.Node) error {
+	f.mu.Lock()
+	f.lastSync = append([]model.Node(nil), nodes...)
+	f.mu.Unlock()
+	return nil
+}
 
 func (f *fakeEngine) Close() error {
 	f.mu.Lock()
@@ -56,7 +60,7 @@ func (f *fakeEngine) isClosed() bool {
 }
 
 // withTestScheduler builds a Scheduler with a fake engine (recording Close) so
-// no xray is spawned. The real engine is closed on cleanup.
+// no mihomo is spawned. The real engine is closed on cleanup.
 func withTestScheduler(t *testing.T, cfg Config) (*Scheduler, *fakeEngine) {
 	t.Helper()
 	s, err := New(cfg)
@@ -83,11 +87,10 @@ func TestRunTickerFires(t *testing.T) {
 		StatePath:   filepath.Join(dir, "state.db"),
 		SourcesPath: filepath.Join(dir, "sources.txt"),
 		AssetsDir:   filepath.Join(dir, "assets"),
-		CoreDir:     filepath.Join(dir, "core"),
 		OutDir:      filepath.Join(dir, "out"),
 		Interval:    20 * time.Millisecond,
-		TopN:      5,
-		MinKeep:   1,
+		TopN:        5,
+		MinKeep:     1,
 	}
 	s, fake := withTestScheduler(t, cfg)
 	enabledSource(t, s)
@@ -106,10 +109,10 @@ func TestRunTickerFires(t *testing.T) {
 		}, nil
 	}
 	s.GeoFn = func(n model.Node) string { return "US" }
-	s.ProbeFn = func(ctx context.Context, nodes []model.Node) (map[string]test.Result, error) {
-		out := make(map[string]test.Result)
+	s.ProbeFn = func(ctx context.Context, nodes []model.Node) (map[string]mihomo.Result, error) {
+		out := make(map[string]mihomo.Result)
 		for _, n := range nodes {
-			out[nodeHash(&n)] = test.Result{Alive: n.Host == "alive.example.com", LatencyMs: 10}
+			out[nodeHash(&n)] = mihomo.Result{Alive: n.Host == "alive.example.com", LatencyMs: 10}
 		}
 		return out, nil
 	}
@@ -149,7 +152,6 @@ func TestCyclePersists(t *testing.T) {
 		StatePath:   filepath.Join(dir, "state.db"),
 		SourcesPath: filepath.Join(dir, "sources.txt"),
 		AssetsDir:   filepath.Join(dir, "assets"),
-		CoreDir:     filepath.Join(dir, "core"),
 		OutDir:      filepath.Join(dir, "out"),
 		TopN:        5,
 		MinKeep:     1,
@@ -165,10 +167,10 @@ func TestCyclePersists(t *testing.T) {
 		}, nil
 	}
 	s.GeoFn = func(n model.Node) string { return "US" }
-	s.ProbeFn = func(ctx context.Context, nodes []model.Node) (map[string]test.Result, error) {
-		out := make(map[string]test.Result)
+	s.ProbeFn = func(ctx context.Context, nodes []model.Node) (map[string]mihomo.Result, error) {
+		out := make(map[string]mihomo.Result)
 		for _, n := range nodes {
-			out[nodeHash(&n)] = test.Result{Alive: true, LatencyMs: 10}
+			out[nodeHash(&n)] = mihomo.Result{Alive: true, LatencyMs: 10}
 		}
 		return out, nil
 	}
@@ -235,18 +237,18 @@ func TestDegradeSwap(t *testing.T) {
 		mk("better.example.com", 5),
 		mk("better2.example.com", 5),
 	}
-	selected := []model.Node{cands[0].Node, cands[1].Node, cands[2].Node}
+	selected := []selector.Candidate{cands[0], cands[1], cands[2]}
 
 	got := applyDegrade(selected, cands, 0)
 
 	for _, n := range got {
-		if n.Host == "degraded.example.com" {
+		if n.Node.Host == "degraded.example.com" {
 			t.Fatalf("degraded node still selected: %v", got)
 		}
 	}
 	found := false
 	for _, n := range got {
-		if n.Host == "better.example.com" {
+		if n.Node.Host == "better.example.com" {
 			found = true
 		}
 	}
@@ -264,14 +266,14 @@ func TestDegradeNoSwapWhenHealthy(t *testing.T) {
 		}
 	}
 	cands := []selector.Candidate{mk("a.example.com", 10), mk("b.example.com", 10), mk("c.example.com", 10)}
-	selected := []model.Node{cands[0].Node, cands[1].Node, cands[2].Node}
+	selected := []selector.Candidate{cands[0], cands[1], cands[2]}
 
 	got := applyDegrade(selected, cands, 0)
 	if len(got) != len(selected) {
 		t.Fatalf("expected %d nodes, got %d", len(selected), len(got))
 	}
 	for i, n := range got {
-		if n.Host != selected[i].Host {
+		if n.Node.Host != selected[i].Node.Host {
 			t.Fatalf("selection changed: got %v want %v", got, selected)
 		}
 	}
@@ -285,7 +287,6 @@ func TestCorpseSkip(t *testing.T) {
 		StatePath:    filepath.Join(dir, "state.db"),
 		SourcesPath:  filepath.Join(dir, "sources.txt"),
 		AssetsDir:    filepath.Join(dir, "assets"),
-		CoreDir:      filepath.Join(dir, "core"),
 		OutDir:       filepath.Join(dir, "out"),
 		TopN:         5,
 		MinKeep:      1,
@@ -318,13 +319,13 @@ func TestCorpseSkip(t *testing.T) {
 		return []model.Node{corpse, live}, nil
 	}
 	s.GeoFn = func(n model.Node) string { return "US" }
-	s.ProbeFn = func(ctx context.Context, nodes []model.Node) (map[string]test.Result, error) {
+	s.ProbeFn = func(ctx context.Context, nodes []model.Node) (map[string]mihomo.Result, error) {
 		for range nodes {
 			atomic.AddInt32(&probed, 1)
 		}
-		out := make(map[string]test.Result)
+		out := make(map[string]mihomo.Result)
 		for _, n := range nodes {
-			out[nodeHash(&n)] = test.Result{Alive: n.Host == "live.example.com", LatencyMs: 10}
+			out[nodeHash(&n)] = mihomo.Result{Alive: n.Host == "live.example.com", LatencyMs: 10}
 		}
 		return out, nil
 	}
@@ -335,5 +336,112 @@ func TestCorpseSkip(t *testing.T) {
 
 	if got := atomic.LoadInt32(&probed); got != 1 {
 		t.Fatalf("expected only the live node to be probed (corpse skipped), got %d probes", got)
+	}
+}
+
+// TestDualPoolSeedAndReplace verifies the two core F4 invariants:
+//  1. SeedSubscription populates out/ immediately (first-boot gap closed).
+//  2. ReplaceRoutine hands the FULL union to SyncNodes, never a partial set
+//     that would wipe other proxies (oracle CRITICAL).
+func TestDualPoolSeedAndReplace(t *testing.T) {
+	dir := t.TempDir()
+	cfg := Config{
+		StatePath:   filepath.Join(dir, "state.db"),
+		SourcesPath: filepath.Join(dir, "sources.txt"),
+		AssetsDir:   filepath.Join(dir, "assets"),
+		OutDir:      filepath.Join(dir, "out"),
+		TopN:        5,
+		SubTopN:     5,
+		MinKeep:     1,
+	}
+	s, fake := withTestScheduler(t, cfg)
+	enabledSource(t, s)
+	defer s.Stop()
+
+	s.FetchFn = func(ctx context.Context, src config.Source) ([]model.Node, error) {
+		return []model.Node{
+			{Protocol: model.SchemeVLESS, Host: "node-a.example.com", Port: 443, User: "u1", Security: "tls", Name: "A"},
+			{Protocol: model.SchemeVLESS, Host: "node-b.example.com", Port: 443, User: "u2", Security: "tls", Name: "B"},
+			{Protocol: model.SchemeVLESS, Host: "node-d.example.com", Port: 443, User: "u4", Security: "tls", Name: "D"},
+			{Protocol: model.SchemeVLESS, Host: "node-c.example.com", Port: 443, User: "u3", Security: "tls", Name: "C"},
+		}, nil
+	}
+	s.GeoFn = func(n model.Node) string {
+		if n.Host == "node-c.example.com" {
+			return "DE"
+		}
+		return "US"
+	}
+	s.ProbeFn = func(ctx context.Context, nodes []model.Node) (map[string]mihomo.Result, error) {
+		out := make(map[string]mihomo.Result)
+		for _, n := range nodes {
+			out[nodeHash(&n)] = mihomo.Result{Alive: true, LatencyMs: 10}
+		}
+		return out, nil
+	}
+
+	if err := s.Cycle(context.Background()); err != nil {
+		t.Fatalf("Cycle: %v", err)
+	}
+	if err := s.SeedSubscription(); err != nil {
+		t.Fatalf("SeedSubscription: %v", err)
+	}
+
+	// (1) first-boot populate: out/ must contain all seeded hosts.
+	sb, err := os.ReadFile(filepath.Join(dir, "out", "singbox.json"))
+	if err != nil {
+		t.Fatalf("read singbox: %v", err)
+	}
+	for _, h := range []string{"node-a.example.com", "node-b.example.com", "node-c.example.com", "node-d.example.com"} {
+		if !strings.Contains(string(sb), h) {
+			t.Fatalf("singbox.json missing seeded host %s: %s", h, sb)
+		}
+	}
+
+	// Pick a US subscription member to replace.
+	subs, err := s.st.ListSubscription()
+	if err != nil {
+		t.Fatalf("list subscription: %v", err)
+	}
+	var deadHash string
+	for _, r := range subs {
+		n, e := s.st.NodeByHash(r.NodeID)
+		if e == nil && n.Country == "US" {
+			deadHash = r.NodeID
+			break
+		}
+	}
+	if deadHash == "" {
+		t.Fatalf("no US subscription member found")
+	}
+
+	fake.mu.Lock()
+	fake.lastSync = nil
+	fake.mu.Unlock()
+
+	if err := s.ReplaceRoutine(deadHash); err != nil {
+		t.Fatalf("ReplaceRoutine: %v", err)
+	}
+
+	// (2) full-union non-wipe: SyncNodes must have received EVERY common node,
+	// including node-d which is NOT a subscription member.
+	fake.mu.Lock()
+	got := append([]model.Node(nil), fake.lastSync...)
+	fake.mu.Unlock()
+	if len(got) == 0 {
+		t.Fatalf("SyncNodes was never called by ReplaceRoutine")
+	}
+	hasD := false
+	for _, n := range got {
+		if n.Host == "node-d.example.com" {
+			hasD = true
+		}
+	}
+	if !hasD {
+		hosts := make([]string, 0, len(got))
+		for _, n := range got {
+			hosts = append(hosts, n.Host)
+		}
+		t.Fatalf("ReplaceRoutine passed a PARTIAL set to SyncNodes (missing node-d); got %v", hosts)
 	}
 }
