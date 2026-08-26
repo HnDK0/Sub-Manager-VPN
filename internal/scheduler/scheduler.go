@@ -447,10 +447,19 @@ func (s *Scheduler) defaultProbe(ctx context.Context, nodes []model.Node) (map[s
 	out := make(map[string]mihomo.Result, len(nodes))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
+	// Honor -workers: bound concurrent probes through the engine. The embedded
+	// mihomo hub parallelizes URLTest, so this is the real concurrency knob.
+	workers := s.cfg.Workers
+	if workers <= 0 {
+		workers = 32
+	}
+	sem := make(chan struct{}, workers)
 	for _, n := range nodes {
 		wg.Add(1)
+		sem <- struct{}{}
 		go func(n model.Node) {
 			defer wg.Done()
+			defer func() { <-sem }()
 			r, err := s.engine.Probe(ctx, n)
 			if err != nil {
 				// Infra failure (pool down / ctx cancelled): drop this node this

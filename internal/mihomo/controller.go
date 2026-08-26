@@ -243,11 +243,22 @@ func (c *Controller) Probe(ctx context.Context, n model.Node) (Result, error) {
 		return Result{}, ErrClosed
 	}
 
-	if err := c.EnsureNode(n); err != nil {
-		// node may be unsupported by mihomo; treat as dead, not fatal.
-		return Result{ProbeCount: 1}, nil
-	}
 	h := nodeHash(&n)
+	// Hot path: SyncNodes already loaded the full union before a batch probe,
+	// so the node is present. Do NOT take the exclusive write lock here — each
+	// Latency() holds the read lock for the whole URLTest, and a write-lock
+	// request would block until that read lock is released, serializing every
+	// probe into a single stream. Only fall back to EnsureNode (which reloads
+	// config under the write lock) when the node was not yet synced.
+	c.mu.RLock()
+	_, present := c.nodes[h]
+	c.mu.RUnlock()
+	if !present {
+		if err := c.EnsureNode(n); err != nil {
+			// node may be unsupported by mihomo; treat as dead, not fatal.
+			return Result{ProbeCount: 1}, nil
+		}
+	}
 	expected, err := utils.NewUnsignedRanges[uint16]("200-299")
 	if err != nil {
 		expected, _ = utils.NewUnsignedRanges[uint16]("200-299")

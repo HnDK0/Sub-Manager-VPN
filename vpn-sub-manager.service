@@ -5,9 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# Adjust the path to the built binary. The binary auto-downloads + SHA-verifies
-# xray-core/sing-box on first run, then serves subscriptions and self-refreshes
-# via an in-process ticker — so NO systemd timer is needed.
+# Adjust the path to the built binary. The mihomo engine is embedded (no external
+# core download); the binary serves subscriptions and self-refreshes via an
+# in-process ticker — so NO systemd timer is needed. Logs go to journald.
 ExecStart=%h/.local/bin/vpn-sub-manager
 Restart=always
 RestartSec=5
