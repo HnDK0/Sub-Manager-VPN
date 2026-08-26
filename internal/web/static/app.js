@@ -660,6 +660,7 @@ const SETTINGS_FIELDS = [
   { key: "out_dir", label: "Output Dir", type: "text", note: "generated subscriptions directory", readonly: true },
   { key: "cores_dir", label: "Cores Dir", type: "text", note: "xray/sing-box binaries directory", readonly: true },
   { key: "exclude_countries", label: "Exclude Countries", type: "countries", note: "comma-separated ISO codes to exclude from subscriptions (e.g. ru,cn)" },
+  { key: "exclude_protocols", label: "Exclude Protocols", type: "protocols", note: "protocols to skip probing entirely (e.g. vmess,tuic)" },
   { key: "workers", label: "Workers", type: "number", note: "probe worker-pool size (each owns one xray process); lower = gentler on weak VPS/network (default 4)" },
 ];
 
@@ -671,7 +672,7 @@ async function loadSettings() {
 
     const form = $("settings-form");
     form.innerHTML = SETTINGS_FIELDS.map(f => {
-      if (f.type === "countries") {
+      if (f.type === "countries" || f.type === "protocols") {
         return `<div class="settings-field">
           <label>${esc(f.label)}</label>
           <div id="sf-${f.key}" class="countries-checks"></div>
@@ -713,6 +714,17 @@ async function loadSettings() {
       } catch (e) { ccBox.textContent = "failed to load countries"; }
     }
 
+    // populate exclude_protocols checkboxes (hardcoded list)
+    const pcBox = $("sf-exclude_protocols");
+    if (pcBox) {
+      const PROTOCOLS = ["vmess","vless","trojan","hysteria2","tuic"];
+      const excludedP = new Set((s.exclude_protocols || []).map(p => p.toLowerCase()));
+      pcBox.innerHTML = PROTOCOLS.map(p => {
+        const id = "pc-" + p;
+        return `<label><input type="checkbox" id="${id}" value="${p}" ${excludedP.has(p) ? "checked" : ""}> ${esc(p.toUpperCase())}</label>`;
+      }).join("");
+    }
+
     const btnCleanup = $("btn-cleanup");
     if (btnCleanup) {
       btnCleanup.onclick = async () => {
@@ -733,7 +745,7 @@ async function saveSettings(current) {
   SETTINGS_FIELDS.forEach(f => {
     const el = $("sf-" + f.key);
     if (!el || el.readOnly) return;
-    if (f.type === "countries") {
+    if (f.type === "countries" || f.type === "protocols") {
       patch[f.key] = [...el.querySelectorAll("input[type=checkbox]:checked")].map(cb => cb.value.toUpperCase());
       return;
     }

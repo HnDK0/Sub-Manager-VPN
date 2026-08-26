@@ -35,6 +35,7 @@ type Settings struct {
 	MinSpeedMbps     int      `json:"min_speed_mbps"`
 	SpeedTestTopN    int      `json:"speed_test_topn"`
 	ExcludeCountries []string `json:"exclude_countries"`
+	ExcludeProtocols []string `json:"exclude_protocols"`
 	Workers          int      `json:"workers"`
 }
 

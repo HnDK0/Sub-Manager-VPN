@@ -62,6 +62,9 @@ type Config struct {
 	// ExcludeCountries holds 2-letter ISO codes whose nodes are dropped from
 	// selection (e.g. a user in RU typically does not want RU exit nodes).
 	ExcludeCountries []string
+	// ExcludeProtocols holds scheme strings (vmess/vless/trojan/hysteria2/tuic)
+	// whose nodes are skipped entirely (no probe, never selected).
+	ExcludeProtocols []string
 	// Workers is the probe worker-pool size; each worker owns one xray process.
 	// 0 defaults to 8 (lower = gentler on weak VPS / constrained networks).
 	Workers int
@@ -616,9 +619,34 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 	}
 	s.setStatus(func(st *Snapshot) { st.NodesUpserted = upserted })
 
-	// Probe batch.
+	// Build skip sets for excluded countries/protocols so we don't waste probe
+	// budget on nodes that can never reach a subscription. Country is already
+	// resolved (GeoFn ran above), so both filters are known here.
+	exclude := make(map[string]bool, len(s.cfg.ExcludeCountries))
+	for _, c := range s.cfg.ExcludeCountries {
+		if c = strings.ToUpper(strings.TrimSpace(c)); c != "" {
+			exclude[c] = true
+		}
+	}
+	skipProto := make(map[string]bool, len(s.cfg.ExcludeProtocols))
+	for _, p := range s.cfg.ExcludeProtocols {
+		if p = strings.ToLower(strings.TrimSpace(p)); p != "" {
+			skipProto[p] = true
+		}
+	}
+
+	// Probe batch: skip excluded countries/protocols. enrichedNodes still
+	// derives from the full node set (for upsert/history), but results are only
+	// produced for the filtered slice, so skipped nodes never reach selection.
 	s.setStatus(func(st *Snapshot) { st.Phase = PhaseProbe })
-	results, err := s.ProbeFn(ctx, nodes)
+	probeNodes := make([]model.Node, 0, len(nodes))
+	for _, n := range nodes {
+		if exclude[strings.ToUpper(n.Country)] || skipProto[strings.ToLower(string(n.Protocol))] {
+			continue
+		}
+		probeNodes = append(probeNodes, n)
+	}
+	results, err := s.ProbeFn(ctx, probeNodes)
 	if err != nil {
 		return fmt.Errorf("scheduler: probe: %w", err)
 	}
@@ -653,14 +681,8 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 	// they can never reach a generated subscription. The min-speed brake drops
 	// nodes whose measured throughput is below the configured floor.
 	// Drop nodes whose resolved country is in the exclude list so they can
-	// never reach a generated subscription.
-	exclude := make(map[string]bool, len(s.cfg.ExcludeCountries))
-	for _, c := range s.cfg.ExcludeCountries {
-		if c = strings.ToUpper(strings.TrimSpace(c)); c != "" {
-			exclude[c] = true
-		}
-	}
-
+	// never reach a generated subscription (safety net; they were already
+	// skipped at probe time above).
 	var cands []selector.Candidate
 	floorKbps := s.cfg.MinSpeedMbps * 1000
 	for _, en := range enrichedNodes {

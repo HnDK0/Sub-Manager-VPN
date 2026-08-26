@@ -44,6 +44,7 @@ type Config struct {
 	MinSpeedMbps     int      // throughput floor for the speed brake (0 disables)
 	SpeedTestTopN    int      // MB cap for the speed sample download
 	ExcludeCountries []string // ISO codes excluded from subscriptions (e.g. ru,cn)
+	ExcludeProtocols []string // schemes excluded from probing/subscriptions (e.g. vmess,trojan)
 	Workers          int      // probe worker-pool size (each owns one xray process); 0 = default 8
 }
 
@@ -89,6 +90,7 @@ func main() {
 		MinSpeedMbps:     cfg.MinSpeedMbps,
 		SpeedTestTopN:    cfg.SpeedTestTopN,
 		ExcludeCountries: cfg.ExcludeCountries,
+		ExcludeProtocols: cfg.ExcludeProtocols,
 		Workers:          cfg.Workers,
 	}
 	if err := settings.Save(configPath, eff); err != nil {
@@ -151,6 +153,7 @@ func parseFlags() (Config, string) {
 	minSpeedMbps := flag.Int("min-speed-mbps", dfltInt(existed, loaded.MinSpeedMbps, 0), "throughput floor (Mbps) for the speed brake; 0 disables")
 	speedTestTopN := flag.Int("speed-test-topn", dfltInt(existed, loaded.SpeedTestTopN, 5), "MB cap for the speed sample download")
 	excludeCountries := flag.String("exclude-countries", strings.Join(loaded.ExcludeCountries, ","), "comma-separated ISO country codes to exclude from subscriptions (e.g. ru,cn)")
+	excludeProtocols := flag.String("exclude-protocols", strings.Join(loaded.ExcludeProtocols, ","), "comma-separated schemes to exclude from probing/subscriptions (e.g. vmess,trojan)")
 	workers := flag.Int("workers", dfltInt(existed, loaded.Workers, 4), "probe worker-pool size (each owns one xray process); lower = gentler on weak VPS/network (default 4)")
 	// Re-register -config on the main set so flag.Parse accepts it (value already resolved).
 	flag.String("config", configPath, "persisted runtime config (config.json); CLI flags override file values")
@@ -160,6 +163,12 @@ func parseFlags() (Config, string) {
 	for _, p := range strings.Split(*excludeCountries, ",") {
 		if p = strings.TrimSpace(strings.ToUpper(p)); p != "" {
 			excl = append(excl, p)
+		}
+	}
+	var exclP []string
+	for _, p := range strings.Split(*excludeProtocols, ",") {
+		if p = strings.TrimSpace(strings.ToLower(p)); p != "" {
+			exclP = append(exclP, p)
 		}
 	}
 
@@ -193,6 +202,7 @@ func parseFlags() (Config, string) {
 		MinSpeedMbps:     *minSpeedMbps,
 		SpeedTestTopN:    *speedTestTopN,
 		ExcludeCountries: excl,
+		ExcludeProtocols: exclP,
 		Workers:          *workers,
 	}, configPath
 }
@@ -316,6 +326,7 @@ func runInner(ctx context.Context, cfg Config, sch *scheduler.Scheduler, skipUI 
 		MinSpeedMbps:     cfg.MinSpeedMbps,
 		SpeedTestTopN:    cfg.SpeedTestTopN,
 		ExcludeCountries: cfg.ExcludeCountries,
+		ExcludeProtocols: cfg.ExcludeProtocols,
 		Workers:          cfg.Workers,
 		IsBanned:         bansStore.Has,
 	}
