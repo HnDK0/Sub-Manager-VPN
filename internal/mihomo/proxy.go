@@ -176,5 +176,35 @@ func applyTransport(base map[string]any, net string, n model.Node) {
 			grpc["grpc-service-name"] = svc
 		}
 		base["grpc-opts"] = grpc
+	case "xhttp":
+		x := map[string]any{}
+		if p := extra(n, "path"); p != "" {
+			x["path"] = p
+		}
+		if h := extra(n, "host"); h != "" {
+			x["host"] = h
+		}
+		if m := extra(n, "mode"); m != "" {
+			x["mode"] = m
+		}
+		base["xhttp-opts"] = x
+	case "http":
+		h := map[string]any{}
+		if p := extra(n, "path"); p != "" {
+			h["path"] = p
+		}
+		if ho := extra(n, "host"); ho != "" {
+			h["headers"] = map[string]any{"Host": ho}
+		}
+		base["http-opts"] = h
+	case "h2":
+		h2 := map[string]any{}
+		if p := extra(n, "path"); p != "" {
+			h2["path"] = p
+		}
+		if ho := extra(n, "host"); ho != "" {
+			h2["headers"] = map[string]any{"Host": ho}
+		}
+		base["h2-opts"] = h2
 	}
 }
