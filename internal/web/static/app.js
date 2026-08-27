@@ -75,8 +75,6 @@ async function connect() {
   ES.addEventListener("status", e => renderStatus(JSON.parse(e.data)));
   ES.addEventListener("pipeline", e => renderPipeline(JSON.parse(e.data)));
   ES.addEventListener("nodes", e => {
-    // Full node list (for the country dropdown + live counts). The table itself
-    // is served paginated via GET /api/nodes; re-fetch it when on the Nodes tab.
     window._allNodes = JSON.parse(e.data);
     rebuildCountryDropdown();
     if (currentTab() === "nodes") loadNodes();
@@ -109,6 +107,15 @@ document.querySelectorAll(".nav-btn").forEach(btn => {
   };
 });
 
+// Keyboard nav: arrow keys to switch tabs
+document.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT") return;
+  const btns = [...document.querySelectorAll(".nav-btn")];
+  const idx = btns.findIndex(b => b.classList.contains("active"));
+  if (e.key === "ArrowRight" && idx < btns.length - 1) { btns[idx + 1].click(); btns[idx + 1].focus(); }
+  if (e.key === "ArrowLeft" && idx > 0) { btns[idx - 1].click(); btns[idx - 1].focus(); }
+});
+
 // ── Dashboard ───────────────────────────────────────────────────────
 function renderStatus(d) {
   const k = d.kpis || {};
@@ -125,8 +132,8 @@ function renderStatus(d) {
   const prog = (label, done, total) => (total > 0 ? `
     <div style="margin-top:6px">
       <div class="muted">${esc(label)}: ${done || 0} / ${total}</div>
-      <div style="height:8px;background:#222;border-radius:4px;overflow:hidden;margin-top:3px">
-        <div style="height:100%;background:#4aa3ff;width:${Math.min(100, (100 * (done || 0) / total)).toFixed(1)}%"></div>
+      <div style="height:8px;background:var(--bg);border-radius:4px;overflow:hidden;margin-top:3px;border:1px solid var(--border)">
+        <div style="height:100%;background:var(--accent);border-radius:4px;transition:width .3s ease;width:${Math.min(100, (100 * (done || 0) / total)).toFixed(1)}%"></div>
       </div>
     </div>` : '');
   const fetchBar = d.phase === 'fetch' ? prog('источники', d.sourceDone, d.sourceTotal) : '';
@@ -175,9 +182,6 @@ function renderPipeline(snap) {
 }
 
 function appendLog(data) {
-  // The SSE "log" payload is JSON-encoded (a quoted string); decode it so the
-  // panel shows the raw line without surrounding quotes. Non-string JSON (or
-  // invalid JSON) falls back to the raw value.
   let line = data;
   try {
     const p = JSON.parse(data);
@@ -288,7 +292,6 @@ async function editSource(id, currentUrl) {
 }
 
 // ── Nodes ───────────────────────────────────────────────────────────
-// ISO-3166 alpha-2 -> human name (common countries). Fallback to raw code.
 const ISO_NAMES = {
   AF:"Afghanistan",AL:"Albania",DZ:"Algeria",AR:"Argentina",AU:"Australia",
   AT:"Austria",AZ:"Azerbaijan",BH:"Bahrain",BD:"Bangladesh",BY:"Belarus",
@@ -311,7 +314,7 @@ const ISO_NAMES = {
   VN:"Vietnam",YE:"Yemen",ZM:"Zambia"
 };
 
-window._allNodes = [];   // full list from SSE (dropdown + counts)
+window._allNodes = [];
 window._nodePage = { total: 0, limit: 50, offset: 0, nodes: [] };
 window._nodeOffset = 0;
 
@@ -322,7 +325,6 @@ function countryName(code) {
   return ISO_NAMES[up] || up;
 }
 
-// Regional-indicator flag emoji from an ISO-3166 alpha-2 code (or 🏳 fallback).
 function flagEmoji(code) {
   if (!code || code.length !== 2) return "🏳";
   const A = 0x1F1E6, base = "A".charCodeAt(0);
@@ -331,32 +333,21 @@ function flagEmoji(code) {
          String.fromCodePoint(A + up.charCodeAt(1) - base);
 }
 
-// Latency coloring: <300ms green, >=300ms red (ping/latency only, not throughput).
 function latencyHTML(ms, alive) {
   if (!alive) return "—";
   const cls = ms < 300 ? "lat-good" : "lat-bad";
   return `<span class="${cls}">${ms} ms</span>`;
 }
 
-// Rebuild the country multi-select (checkboxes dropdown) from GET /api/countries.
-// Preserves the user's current selection across SSE-triggered rebuilds.
+// ── Country multi-select ────────────────────────────────────────────
 async function rebuildCountryDropdown() {
   const panel = $("node-country-panel");
   if (!panel) return;
-
-  // Capture current selection before innerHTML wipe
   const prevSel = getSelectedCountries();
-
   let data;
-  try {
-    data = await api("/countries");
-  } catch (e) {
-    return; // leave dropdown as-is if the backend call fails
-  }
+  try { data = await api("/countries"); } catch (e) { return; }
   const countries = (data && data.countries) || [];
   const unknown = (data && data.unknown) || 0;
-
-  // Determine "All" state: checked only if no specific countries were selected
   const prevAll = prevSel.length === 0;
   let html = `<label class="country-option"><input type="checkbox" data-all="1" ${prevAll ? "checked" : ""} /> All</label>`;
   if (unknown > 0) html += `<label class="country-option"><input type="checkbox" value="unknown" /> 🏳 Unknown (${unknown})</label>`;
@@ -368,7 +359,6 @@ async function rebuildCountryDropdown() {
   });
   panel.innerHTML = html;
 
-  // Wire checkboxes
   const allCb = panel.querySelector("[data-all]");
   const codes = panel.querySelectorAll("input:not([data-all])");
   allCb.addEventListener("change", () => {
@@ -383,7 +373,6 @@ async function rebuildCountryDropdown() {
     window._nodeOffset = 0;
     loadNodes();
   }));
-
   updateCountryBtn();
 }
 
@@ -391,7 +380,7 @@ function getSelectedCountries() {
   const panel = $("node-country-panel");
   if (!panel) return [];
   const allCb = panel.querySelector("[data-all]");
-  if (allCb && allCb.checked) return []; // empty = all
+  if (allCb && allCb.checked) return [];
   return [...panel.querySelectorAll("input:not([data-all]):checked")].map(cb => cb.value).filter(Boolean);
 }
 
@@ -401,12 +390,12 @@ function updateCountryBtn() {
   btn.textContent = sel.length ? sel.join(", ") + " ▾" : "All countries ▾";
 }
 
+// ── Node table + pagination ─────────────────────────────────────────
 function renderNodeTable() {
   const d = window._nodePage || { total: 0, nodes: [] };
   const total = d.total || 0;
   const list = d.nodes || [];
-  $("node-count").textContent = `${list.length} shown / ${total} total`;
-
+  renderNodeInfo();
   const tb = $("node-table").querySelector("tbody");
   const empty = $("node-empty");
   if (!list.length) {
@@ -437,8 +426,41 @@ function renderNodeTable() {
   tb.querySelectorAll("[data-speed]").forEach(b => b.onclick = () => speedTest(b.dataset.speed, b.closest("tr")));
   tb.querySelectorAll("[data-copy-node]").forEach(b => b.onclick = () => copyNodeConfig(b.dataset.copyNode));
   tb.querySelectorAll("[data-ban]").forEach(b => b.onclick = () => banNode(b.dataset.ban));
+  updateSortIndicators();
 }
 
+// Showing X–Y of Z + page size selector
+function renderNodeInfo() {
+  const d = window._nodePage || { total: 0, limit: 50, offset: 0 };
+  const total = d.total || 0;
+  const limit = d.limit || 50;
+  const offset = d.offset || 0;
+  const from = total > 0 ? offset + 1 : 0;
+  const to = Math.min(offset + limit, total);
+  const el = $("node-count");
+  if (!el) return;
+  el.innerHTML = `
+    <span class="showing">Showing ${from}–${to} of ${total}</span>
+    <span class="node-page-size">
+      <label class="muted">Per page:</label>
+      <select id="node-page-size">
+        <option value="25"${limit === 25 ? ' selected' : ''}>25</option>
+        <option value="50"${limit === 50 ? ' selected' : ''}>50</option>
+        <option value="100"${limit === 100 ? ' selected' : ''}>100</option>
+        <option value="200"${limit === 200 ? ' selected' : ''}>200</option>
+      </select>
+    </span>`;
+  const pageSize = $("node-page-size");
+  if (pageSize) {
+    pageSize.onchange = () => {
+      window._nodePage.limit = parseInt(pageSize.value, 10);
+      window._nodeOffset = 0;
+      loadNodes();
+    };
+  }
+}
+
+// Full pager: page numbers + prev/next + go-to-page
 function renderNodePagination() {
   const d = window._nodePage || { total: 0, limit: 50, offset: 0 };
   const total = d.total || 0;
@@ -448,13 +470,78 @@ function renderNodePagination() {
   const cur = Math.floor(offset / limit) + 1;
   const el = $("node-pagination");
   if (!el) return;
+  if (total === 0) { el.innerHTML = ""; return; }
+
+  // Windowed page numbers: show up to 7 buttons + ellipsis
+  const maxVisible = 7;
+  let start = Math.max(1, cur - Math.floor(maxVisible / 2));
+  let end = Math.min(pages, start + maxVisible - 1);
+  if (end - start < maxVisible - 1) start = Math.max(1, end - maxVisible + 1);
+
+  let btns = "";
+  if (start > 1) {
+    btns += `<button class="pager-btn" data-page="1">1</button>`;
+    if (start > 2) btns += `<span class="pager-ellipsis">…</span>`;
+  }
+  for (let i = start; i <= end; i++) {
+    btns += `<button class="pager-btn${i === cur ? " active" : ""}" data-page="${i}">${i}</button>`;
+  }
+  if (end < pages) {
+    if (end < pages - 1) btns += `<span class="pager-ellipsis">…</span>`;
+    btns += `<button class="pager-btn" data-page="${pages}">${pages}</button>`;
+  }
+
   el.innerHTML = `
-    <button class="btn btn-sm btn-ghost" id="node-prev" ${offset <= 0 ? "disabled" : ""}>Prev</button>
-    <span class="muted">page ${cur} / ${pages}</span>
-    <button class="btn btn-sm btn-ghost" id="node-next" ${offset + limit >= total ? "disabled" : ""}>Next</button>`;
+    <div class="pager-main">
+      <button class="pager-btn pager-nav" id="node-prev"${offset <= 0 ? " disabled" : ""}>‹</button>
+      ${btns}
+      <button class="pager-btn pager-nav" id="node-next"${offset + limit >= total ? " disabled" : ""}>›</button>
+    </div>
+    <div class="pager-jump">
+      <label>Go to:</label>
+      <input id="node-page-jump" type="number" min="1" max="${pages}" value="${cur}" />
+    </div>`;
+
+  el.querySelectorAll("[data-page]").forEach(btn => {
+    btn.onclick = () => {
+      const page = parseInt(btn.dataset.page, 10);
+      window._nodeOffset = (page - 1) * limit;
+      loadNodes();
+    };
+  });
   const prev = $("node-prev"), next = $("node-next");
   if (prev) prev.onclick = () => { window._nodeOffset = Math.max(0, offset - limit); loadNodes(); };
   if (next) next.onclick = () => { window._nodeOffset = offset + limit; loadNodes(); };
+  const jump = $("node-page-jump");
+  if (jump) {
+    jump.onkeydown = (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        const page = parseInt(jump.value, 10);
+        if (page >= 1 && page <= pages) {
+          window._nodeOffset = (page - 1) * limit;
+          loadNodes();
+        }
+      }
+    };
+  }
+}
+
+// Sort indicators on column headers
+function updateSortIndicators() {
+  const sort = $("node-sort").value;
+  const order = $("node-order").value;
+  document.querySelectorAll("#node-table th.sortable").forEach(th => {
+    const icon = th.querySelector(".sort-icon");
+    if (!icon) return;
+    if (th.dataset.sort === sort) {
+      icon.textContent = order === "asc" ? " ▲" : " ▼";
+      th.classList.add("sorted");
+    } else {
+      icon.textContent = "";
+      th.classList.remove("sorted");
+    }
+  });
 }
 
 async function loadNodes() {
@@ -464,7 +551,7 @@ async function loadNodes() {
   const status = ($("node-status").value || "all").trim();
   const sort = ($("node-sort").value || "").trim();
   const order = ($("node-order").value || "asc").trim();
-  const limit = 50;
+  const limit = window._nodePage.limit || 50;
   const offset = window._nodeOffset || 0;
   let q = "limit=" + limit + "&offset=" + offset;
   if (countries.length) q += "&country=" + encodeURIComponent(countries.join(","));
@@ -474,12 +561,16 @@ async function loadNodes() {
   if (sort) q += "&sort=" + encodeURIComponent(sort) + "&order=" + encodeURIComponent(order);
   try {
     window._nodePage = await api("/nodes?" + q);
+    window._nodePage.limit = limit; // preserve chosen page size
     renderNodeTable();
     renderNodePagination();
-  } catch (e) { toast(e.message); }
+  } catch (e) {
+    $("node-count").innerHTML = '<span class="muted" style="color:var(--bad)">Error loading nodes</span>';
+    toast(e.message);
+  }
 }
 
-// Per-node latency measurement (ping only — NOT bandwidth throughput).
+// Per-node latency measurement
 async function speedTest(hash, row) {
   try {
     const r = await api("/nodes/test", {
@@ -505,7 +596,6 @@ async function banNode(hash) {
   } catch (e) { toast(e.message); }
 }
 
-// Copy a single node's raw v2rayN URI (for cross-checking ping in Throne).
 async function copyNodeConfig(hash) {
   try {
     const d = await api("/nodes/" + encodeURIComponent(hash) + "/config");
@@ -526,8 +616,8 @@ async function loadBanned() {
       return;
     }
     el.innerHTML = list.map(h => `
-      <div class="banned-item">
-        <code>${esc(h.slice(0, 16))}…</code>
+      <div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border)">
+        <code style="font-size:12px;color:var(--muted)">${esc(h.slice(0, 16))}…</code>
         <button class="btn btn-sm btn-ghost" data-unban="${esc(h)}">Unban</button>
       </div>`).join("");
     el.querySelectorAll("[data-unban]").forEach(b => b.onclick = () => unbanNode(b.dataset.unban));
@@ -541,12 +631,30 @@ async function unbanNode(hash) {
   } catch (e) { toast(e.message); }
 }
 
+// Filter wiring
 $("btn-node-refresh").onclick = loadNodes;
 $("node-protocol").onchange = () => { window._nodeOffset = 0; loadNodes(); };
 $("node-max-latency").oninput = debounce(() => { window._nodeOffset = 0; loadNodes(); }, 400);
 $("node-status").onchange = () => { window._nodeOffset = 0; loadNodes(); };
 $("node-sort").onchange = () => { window._nodeOffset = 0; loadNodes(); };
 $("node-order").onchange = () => { window._nodeOffset = 0; loadNodes(); };
+
+// Sortable column headers
+document.querySelectorAll("#node-table th.sortable").forEach(th => {
+  th.onclick = () => {
+    const field = th.dataset.sort;
+    const curSort = $("node-sort").value;
+    const curOrder = $("node-order").value;
+    if (curSort === field) {
+      $("node-order").value = curOrder === "asc" ? "desc" : "asc";
+    } else {
+      $("node-sort").value = field;
+      $("node-order").value = "asc";
+    }
+    window._nodeOffset = 0;
+    loadNodes();
+  };
+});
 
 // Country dropdown toggle
 $("node-country-btn").onclick = (e) => {
@@ -881,8 +989,6 @@ $("config-modal-copy").onclick = async () => {
 };
 
 // ── Boot ────────────────────────────────────────────────────────────
-// Fetch status via REST on boot so KPIs render even if SSE is briefly down.
-// SSE remains the live source once connected.
 (async function boot() {
   try {
     const d = await api("/status");

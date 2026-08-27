@@ -19,11 +19,11 @@
   </header>
 
   <nav id="nav">
-    <button class="nav-btn active" data-tab="dashboard">Dashboard</button>
-    <button class="nav-btn" data-tab="sources">Sources</button>
-    <button class="nav-btn" data-tab="nodes">Nodes</button>
-    <button class="nav-btn" data-tab="subscriptions">Subscriptions</button>
-    <button class="nav-btn" data-tab="settings">Settings</button>
+    <button class="nav-btn active" data-tab="dashboard" tabindex="0">Dashboard</button>
+    <button class="nav-btn" data-tab="sources" tabindex="0">Sources</button>
+    <button class="nav-btn" data-tab="nodes" tabindex="0">Nodes</button>
+    <button class="nav-btn" data-tab="subscriptions" tabindex="0">Subscriptions</button>
+    <button class="nav-btn" data-tab="settings" tabindex="0">Settings</button>
   </nav>
 
   <main id="content">
@@ -72,58 +72,72 @@
       </div>
       <div class="panel" style="margin-top:12px">
         <h3>Sources <span id="src-count" class="badge"></span></h3>
-        <table id="src-table">
-          <thead><tr><th>URL</th><th>Type</th><th>Status</th><th>Actions</th></tr></thead>
-          <tbody></tbody>
-        </table>
+        <div class="table-wrap">
+          <table id="src-table">
+            <thead><tr><th>URL</th><th>Type</th><th>Status</th><th>Actions</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
         <div id="src-empty" class="empty hidden">No sources added yet.</div>
       </div>
     </section>
 
     <!-- Nodes -->
     <section id="tab-nodes" class="tab">
-      <div class="panel">
-        <div class="filter-bar">
-          <div class="dropdown-multi" id="node-country-wrap">
-            <button class="btn btn-sm btn-ghost" id="node-country-btn">All countries ▾</button>
-            <div class="dropdown-multi-panel hidden" id="node-country-panel"></div>
-          </div>
-          <select id="node-protocol">
-            <option value="">All protocols</option>
-            <option value="vless">VLESS</option>
-            <option value="vmess">VMess</option>
-            <option value="trojan">Trojan</option>
-            <option value="hysteria2">Hysteria2</option>
-            <option value="tuic">TUIC</option>
-          </select>
-          <input id="node-max-latency" type="number" placeholder="Max latency (ms)" min="0" style="width:140px" />
-          <select id="node-status">
-            <option value="alive" selected>Alive</option>
-            <option value="all">All status</option>
-            <option value="dead">Dead</option>
-          </select>
-          <select id="node-sort">
-            <option value="">Sort by…</option>
-            <option value="latency">Latency</option>
-            <option value="country">Country</option>
-            <option value="protocol">Protocol</option>
-            <option value="name">Name</option>
-            <option value="alive">Status</option>
-          </select>
-          <select id="node-order">
-            <option value="asc">Asc</option>
-            <option value="desc">Desc</option>
-          </select>
-          <button id="btn-node-refresh" class="btn btn-ghost btn-sm">Refresh</button>
-          <button id="btn-node-test" class="btn btn-accent btn-sm">Test Selected</button>
+      <div class="filter-bar sticky-filter">
+        <div class="dropdown-multi" id="node-country-wrap">
+          <button class="btn btn-sm btn-ghost" id="node-country-btn">All countries ▾</button>
+          <div class="dropdown-multi-panel hidden" id="node-country-panel"></div>
         </div>
-        <div id="node-count" class="muted" style="margin-bottom:8px"></div>
-        <table id="node-table">
-          <thead><tr><th><input type="checkbox" id="node-select-all" /></th><th>Name</th><th>Host:Port</th><th>Country</th><th>Protocol</th><th>Status</th><th>Latency</th><th>Speed</th><th>Actions</th></tr></thead>
-          <tbody></tbody>
-        </table>
+        <select id="node-protocol">
+          <option value="">All protocols</option>
+          <option value="vless">VLESS</option>
+          <option value="vmess">VMess</option>
+          <option value="trojan">Trojan</option>
+          <option value="hysteria2">Hysteria2</option>
+          <option value="tuic">TUIC</option>
+        </select>
+        <input id="node-max-latency" type="number" placeholder="Max latency (ms)" min="0" style="width:140px" />
+        <select id="node-status">
+          <option value="alive" selected>Alive</option>
+          <option value="all">All status</option>
+          <option value="dead">Dead</option>
+        </select>
+        <select id="node-sort">
+          <option value="">Sort by…</option>
+          <option value="latency">Latency</option>
+          <option value="country">Country</option>
+          <option value="protocol">Protocol</option>
+          <option value="name">Name</option>
+          <option value="alive">Status</option>
+        </select>
+        <select id="node-order">
+          <option value="asc">Asc</option>
+          <option value="desc">Desc</option>
+        </select>
+        <button id="btn-node-refresh" class="btn btn-ghost btn-sm">Refresh</button>
+        <button id="btn-node-test" class="btn btn-accent btn-sm">Test Selected</button>
+      </div>
+      <div class="panel">
+        <div id="node-count" class="node-info"></div>
+        <div class="table-wrap">
+          <table id="node-table">
+            <thead><tr>
+              <th style="width:36px"><input type="checkbox" id="node-select-all" /></th>
+              <th class="sortable" data-sort="name">Name <span class="sort-icon"></span></th>
+              <th>Host:Port</th>
+              <th class="sortable" data-sort="country">Country <span class="sort-icon"></span></th>
+              <th class="sortable" data-sort="protocol">Protocol <span class="sort-icon"></span></th>
+              <th class="sortable" data-sort="alive">Status <span class="sort-icon"></span></th>
+              <th class="sortable" data-sort="latency">Latency <span class="sort-icon"></span></th>
+              <th>Speed</th>
+              <th>Actions</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
         <div id="node-empty" class="empty hidden">No nodes found. Run a cycle first.</div>
-        <div id="node-pagination" class="pagination" style="margin-top:8px"></div>
+        <div id="node-pagination" class="pagination"></div>
       </div>
       <div class="panel" style="margin-top:12px">
         <h3>Забаненные</h3>
@@ -135,10 +149,12 @@
     <section id="tab-subscriptions" class="tab">
       <div class="panel">
         <h3>Members <span id="sub-mem-count" class="badge"></span></h3>
-        <table id="sub-mem-table">
-          <thead><tr><th>Name</th><th>Country</th><th>Protocol</th><th>Status</th><th>Latency</th><th>Last Ping</th><th>Actions</th></tr></thead>
-          <tbody></tbody>
-        </table>
+        <div class="table-wrap">
+          <table id="sub-mem-table">
+            <thead><tr><th>Name</th><th>Country</th><th>Protocol</th><th>Status</th><th>Latency</th><th>Last Ping</th><th>Actions</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
         <div id="sub-mem-empty" class="empty hidden">No subscription members.</div>
       </div>
       <div class="panel" style="margin-top:12px">
@@ -148,12 +164,12 @@
       </div>
       <div class="panel" style="margin-top:12px">
         <h3>Publish Status</h3>
-<div id="sub-pub-status"></div>
-<div id="sub-pub-urls"></div>
-<div id="sub-pub-nginx"></div>
-<div id="sub-pub-nginx-domains"></div>
-<div id="sub-pub-nginx-admin"></div>
-<div id="sub-pub-httpd"></div>
+        <div id="sub-pub-status"></div>
+        <div id="sub-pub-urls"></div>
+        <div id="sub-pub-nginx"></div>
+        <div id="sub-pub-nginx-domains"></div>
+        <div id="sub-pub-nginx-admin"></div>
+        <div id="sub-pub-httpd"></div>
       </div>
     </section>
 
