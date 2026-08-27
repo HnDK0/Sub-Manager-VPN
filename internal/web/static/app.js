@@ -827,7 +827,7 @@ const SETTINGS_FIELDS = [
   { key: "assets_dir", label: "Assets Dir", type: "text", note: "GeoIP mmdb directory", readonly: true },
   { key: "out_dir", label: "Output Dir", type: "text", note: "generated subscriptions directory", readonly: true },
   { key: "exclude_countries", label: "Exclude Countries", type: "countries", note: "comma-separated ISO codes to exclude from subscriptions (e.g. ru,cn)" },
-  { key: "exclude_protocols", label: "Exclude Protocols", type: "protocols", note: "protocols to skip probing entirely (e.g. vmess,tuic)" },
+  { key: "exclude_protocols", label: "Exclude Protocols", type: "protocols", note: "protocols to skip probing entirely (e.g. vmess,tuic,ss)" },
 ];
 
 async function loadSettings() {
@@ -883,7 +883,7 @@ async function loadSettings() {
     // populate exclude_protocols checkboxes (hardcoded list)
     const pcBox = $("sf-exclude_protocols");
     if (pcBox) {
-      const PROTOCOLS = ["vmess","vless","trojan","hysteria2","tuic"];
+      const PROTOCOLS = ["vmess","vless","trojan","hysteria2","tuic","ss"];
       const excludedP = new Set((s.exclude_protocols || []).map(p => p.toLowerCase()));
       pcBox.innerHTML = PROTOCOLS.map(p => {
         const id = "pc-" + p;
