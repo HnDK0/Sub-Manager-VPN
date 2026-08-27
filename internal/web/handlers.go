@@ -670,7 +670,9 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cycle := s.sch.Status().Cycle
-	if err := s.st.Prune(state.DefaultRetention(), cycle); err != nil {
+	rt := state.DefaultRetention()
+	rt.DeadCycles = s.sch.DeadCycles()
+	if err := s.st.Prune(rt, cycle); err != nil {
 		log.Printf("web: cleanup prune: %v", err)
 	}
 	orphans, err := s.st.DeleteOrphanNodes()

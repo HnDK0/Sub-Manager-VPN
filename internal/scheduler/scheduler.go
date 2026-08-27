@@ -681,6 +681,10 @@ func (s *Scheduler) StopCycle() {
 // do exactly that). The cycle runs under a dedicated cycleCtx (a child of the
 // passed ctx) so it can be aborted independently via StopCycle without killing
 // the process or the ticker.
+// DeadCycles returns the configured dead-node prune window (cycles), so callers
+// such as the web cleanup endpoint honor the same retention the scheduler uses.
+func (s *Scheduler) DeadCycles() int { return s.cfg.DeadCycles }
+
 func (s *Scheduler) Cycle(ctx context.Context) error {
 	// ponytail: derive a fresh, cancellable context per cycle so StopCycle can
 	// abort just this cycle. cycleCtx is a child of ctx, so cancelling it never
