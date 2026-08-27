@@ -170,7 +170,12 @@ func TestCyclePersists(t *testing.T) {
 	s.ProbeFn = func(ctx context.Context, nodes []model.Node) (map[string]mihomo.Result, error) {
 		out := make(map[string]mihomo.Result)
 		for _, n := range nodes {
-			out[nodeHash(&n)] = mihomo.Result{Alive: true, LatencyMs: 10}
+			h := nodeHash(&n)
+			out[h] = mihomo.Result{Alive: true, LatencyMs: 10}
+			// emulate defaultProbe: persist so cands (read from LatestResult) see them
+			if id, e := s.st.NodeID(h); e == nil {
+				_ = s.st.RecordResult(id, true, 10, 0, 1)
+			}
 		}
 		return out, nil
 	}
@@ -376,7 +381,12 @@ func TestDualPoolSeedAndReplace(t *testing.T) {
 	s.ProbeFn = func(ctx context.Context, nodes []model.Node) (map[string]mihomo.Result, error) {
 		out := make(map[string]mihomo.Result)
 		for _, n := range nodes {
-			out[nodeHash(&n)] = mihomo.Result{Alive: true, LatencyMs: 10}
+			h := nodeHash(&n)
+			out[h] = mihomo.Result{Alive: true, LatencyMs: 10}
+			// emulate defaultProbe: persist so cands (read from LatestResult) see them
+			if id, e := s.st.NodeID(h); e == nil {
+				_ = s.st.RecordResult(id, true, 10, 0, 1)
+			}
 		}
 		return out, nil
 	}

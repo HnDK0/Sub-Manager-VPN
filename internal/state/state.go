@@ -703,13 +703,11 @@ func (s *State) deadNodeIDs(deadCycles, currentCycle int) ([]int64, error) {
 		return nil, nil
 	}
 	const q = `
-		SELECT n.id
-		FROM nodes n
-		WHERE (
-			SELECT COALESCE(MAX(r.cycle_id), -1)
-			FROM results r
-			WHERE r.node_id = n.id AND r.alive = 1
-		) < ? - ?`
+		WITH la(nid, last_alive) AS (
+			SELECT n.id, COALESCE((SELECT MAX(r.cycle_id) FROM results r WHERE r.node_id = n.id AND r.alive = 1), -1)
+			FROM nodes n
+		)
+		SELECT nid FROM la WHERE last_alive = -1 OR last_alive < ? - ?`
 	rows, err := s.db.Query(q, currentCycle, deadCycles)
 	if err != nil {
 		return nil, fmt.Errorf("dead node ids: %w", err)
