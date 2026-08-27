@@ -47,6 +47,11 @@ type Config struct {
 	// every cycle). Unlike the old one-way corpse filter, dead nodes are always
 	// re-probed on this rotation — never dropped permanently.
 	ReProbeCycles int
+	// DeadCycles is the retention prune window (in cycles): a node with no alive
+	// result within this many cycles is deleted from the DB. 0 keeps corpses.
+	// Decoupled from ReProbeCycles — this bounds DB growth, the other bounds probe
+	// budget. 84 cycles ≈ 1 week at the 2h default interval.
+	DeadCycles int
 	TopN          int
 	DegradeMs     int
 	MinKeep       int
@@ -241,6 +246,9 @@ func New(cfg Config) (*Scheduler, error) {
 	}
 	if cfg.ReProbeCycles < 0 {
 		cfg.ReProbeCycles = 0
+	}
+	if cfg.DeadCycles < 0 {
+		cfg.DeadCycles = 0
 	}
 	if cfg.TopN <= 0 {
 		cfg.TopN = 5
@@ -868,7 +876,9 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 
 	// Enforce bounded retention so results/history/nodes don't grow unbounded
 	// under continuous 24/7 operation. A prune error must not abort the cycle.
-	if err := s.st.Prune(state.DefaultRetention(), cycle); err != nil {
+	rt := state.DefaultRetention()
+	rt.DeadCycles = s.cfg.DeadCycles
+	if err := s.st.Prune(rt, cycle); err != nil {
 		log.Printf("[scheduler] prune: %v", err)
 	}
 

@@ -39,6 +39,7 @@ type Settings struct {
 	ProbeTimeoutMs      int      `json:"probe_timeout_ms"`
 	MaxPingMs           int      `json:"max_ping_ms"`
 	ReProbeCycles       int      `json:"reprobe_cycles"`        // dead-node skip window (cycles); 0 = probe all
+	DeadCycles          int      `json:"dead_cycles"`           // prune nodes with no alive result within N cycles; 0 = keep
 	SubValidityInterval string   `json:"sub_validity_interval"` // e.g. "5m"
 	SubPingInterval     string   `json:"sub_ping_interval"`     // e.g. "30m"
 	SubTopN             int      `json:"sub_topn"`              // 0 = use TopN
@@ -56,6 +57,7 @@ func Default() Settings {
 		Workers:             350,
 		ProbeTimeoutMs:      2000,
 		ReProbeCycles:       6,
+		DeadCycles:          84, // ~1 week at the 2h default interval
 		SubValidityInterval: "5m",
 		SubPingInterval:     "30m",
 	}

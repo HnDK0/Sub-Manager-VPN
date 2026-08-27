@@ -48,6 +48,7 @@ type Config struct {
 	ProbeTimeoutMs      int      // per-URLTest timeout (ms); 0 = engine default 2000
 	MaxPingMs           int      // drop nodes slower than this (ms) from the served subscription; 0 disables
 	ReProbeCycles       int      // dead-node probe-skip window (cycles); 0 = probe all every cycle
+	DeadCycles          int      // prune nodes with no alive result within N cycles; 0 = keep
 	SubValidityInterval time.Duration
 	SubPingInterval     time.Duration
 	SubTopN             int
@@ -98,6 +99,7 @@ func main() {
 		ProbeTimeoutMs:   cfg.ProbeTimeoutMs,
 		MaxPingMs:        cfg.MaxPingMs,
 		ReProbeCycles:    cfg.ReProbeCycles,
+	DeadCycles:       cfg.DeadCycles,
 	}
 	if err := settings.Save(configPath, eff); err != nil {
 		log.Printf("config: save %s: %v", configPath, err)
@@ -182,6 +184,7 @@ func parseFlags() (Config, string) {
 	probeTimeout := flag.Int("probe-timeout", dfltInt(existed, loaded.ProbeTimeoutMs, 2000), "probe timeout per URLTest in ms (default 2000)")
 	maxPing := flag.Int("max-ping", dfltInt(existed, loaded.MaxPingMs, 0), "drop nodes slower than this (ms) from the served subscription; 0 disables")
 	reprobe := flag.Int("reprobe", dfltInt(existed, loaded.ReProbeCycles, 6), "dead-node probe-skip window in cycles; 0 = probe all every cycle")
+	deadcycles := flag.Int("deadcycles", dfltInt(existed, loaded.DeadCycles, 84), "prune nodes with no alive result within N cycles; 0 = keep")
 	// Re-register -config on the main set so flag.Parse accepts it (value already resolved).
 	flag.String("config", configPath, "persisted runtime config (config.json); CLI flags override file values")
 	flag.Parse()
@@ -232,6 +235,7 @@ func parseFlags() (Config, string) {
 		ProbeTimeoutMs:      *probeTimeout,
 		MaxPingMs:           *maxPing,
 		ReProbeCycles:       *reprobe,
+		DeadCycles:          *deadcycles,
 		SubValidityInterval: *subValidity,
 		SubPingInterval:     *subPing,
 		SubTopN:             *subTopN,
@@ -360,6 +364,7 @@ func runInner(ctx context.Context, cfg Config, sch *scheduler.Scheduler, skipUI 
 		ProbeTimeoutMs:      cfg.ProbeTimeoutMs,
 		MaxPingMs:           cfg.MaxPingMs,
 		ReProbeCycles:       cfg.ReProbeCycles,
+	DeadCycles:          cfg.DeadCycles,
 		SubValidityInterval: cfg.SubValidityInterval,
 		SubPingInterval:     cfg.SubPingInterval,
 		SubTopN:             cfg.SubTopN,

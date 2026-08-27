@@ -55,7 +55,7 @@ type Retention struct {
 	HistoryDays   int // drop results older than this many days (per node)
 	HistoryCycles int // keep at most this many history samples per node
 	NodeTTLCycles int // delete nodes unseen for this many cycles
-	DeadCycles    int // delete nodes with this many consecutive dead results
+	DeadCycles    int // prune nodes with no alive result within this many cycles (cycle-delta from last alive)
 }
 
 // DefaultRetention returns the project-default retention window.
@@ -619,9 +619,9 @@ func (s *State) Prune(cfg Retention, currentCycle int) error {
 		}
 	}
 
-	// 4. Delete nodes with DeadCycles consecutive dead results (most recent first).
+	// 4. Delete nodes with no alive result within DeadCycles cycles (cycle-delta).
 	if cfg.DeadCycles != 0 {
-		ids, err := s.deadNodeIDs(cfg.DeadCycles)
+		ids, err := s.deadNodeIDs(cfg.DeadCycles, currentCycle)
 		if err != nil {
 			return err
 		}
@@ -662,31 +662,6 @@ func (s *State) DeleteOrphanNodes() (int, error) {
 	return int(n), nil
 }
 
-// ConsecutiveDead returns how many of a node's results, counting from the most
-// recent backwards, were dead (not alive) before the first alive result. Nodes
-// with no results yield 0. It backs the scheduler's corpse-skip and the
-// DeadCycles retention prune.
-func (s *State) ConsecutiveDead(nodeID int64) (int, error) {
-	res, err := s.db.Query(`SELECT alive FROM results WHERE node_id = ? ORDER BY cycle_id DESC`, nodeID)
-	if err != nil {
-		return 0, fmt.Errorf("consecutive dead: %w", err)
-	}
-	defer res.Close()
-	count := 0
-	for res.Next() {
-		var alive bool
-		if err := res.Scan(&alive); err != nil {
-			return 0, fmt.Errorf("scan result: %w", err)
-		}
-		if !alive {
-			count++
-		} else {
-			break
-		}
-	}
-	return count, res.Err()
-}
-
 // AliveNodeHashes returns the hashes of nodes whose most-recent results row is
 // alive=1. The scheduler uses this to partition the freshly-parsed node set so
 // the cycle probes the previously-alive ("valid") pool first and cleans corpses
@@ -717,38 +692,38 @@ func (s *State) AliveNodeHashes() ([]string, error) {
 	return out, rows.Err()
 }
 
-// deadNodeIDs returns the ids of nodes whose consecutive-dead count reaches
-// deadCycles (most recent results all dead).
-func (s *State) deadNodeIDs(deadCycles int) ([]int64, error) {
-	nodeRows, err := s.db.Query(`SELECT id FROM nodes`)
+// deadNodeIDs returns the ids of nodes that have not been seen alive within the
+// last deadCycles cycles. A node is pruned when its most recent ALIVE result is
+// older than deadCycles cycles (or it has never been alive). The window is a
+// cycle-delta from the last alive result, so it maps to wall-clock weeks
+// regardless of how often dead nodes are re-probed on the ReProbeCycles rotation.
+// deadCycles <= 0 disables the prune.
+func (s *State) deadNodeIDs(deadCycles, currentCycle int) ([]int64, error) {
+	if deadCycles <= 0 {
+		return nil, nil
+	}
+	const q = `
+		SELECT n.id
+		FROM nodes n
+		WHERE (
+			SELECT COALESCE(MAX(r.cycle_id), -1)
+			FROM results r
+			WHERE r.node_id = n.id AND r.alive = 1
+		) < ? - ?`
+	rows, err := s.db.Query(q, currentCycle, deadCycles)
 	if err != nil {
-		return nil, fmt.Errorf("list nodes: %w", err)
+		return nil, fmt.Errorf("dead node ids: %w", err)
 	}
-	var nodeIDs []int64
-	for nodeRows.Next() {
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
 		var id int64
-		if err := nodeRows.Scan(&id); err != nil {
-			nodeRows.Close()
-			return nil, fmt.Errorf("scan node id: %w", err)
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan dead id: %w", err)
 		}
-		nodeIDs = append(nodeIDs, id)
+		ids = append(ids, id)
 	}
-	nodeRows.Close()
-	if err := nodeRows.Err(); err != nil {
-		return nil, err
-	}
-
-	var dead []int64
-	for _, nid := range nodeIDs {
-		count, err := s.ConsecutiveDead(nid)
-		if err != nil {
-			return nil, err
-		}
-		if count >= deadCycles {
-			dead = append(dead, nid)
-		}
-	}
-	return dead, nil
+	return ids, rows.Err()
 }
 
 // NodeByHash returns the model.Node for a node hash, or an error if none
