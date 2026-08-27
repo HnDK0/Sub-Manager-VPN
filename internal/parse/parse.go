@@ -526,10 +526,79 @@ type clashProxy struct {
 	Method     string `yaml:"method"`
 	Plugin     string `yaml:"plugin"`
 	TLS        bool   `yaml:"tls"`
+	Flow       string `yaml:"flow"`
 	SNI        string `yaml:"sni"`
+	ServerName string `yaml:"servername"`
 	Network    string `yaml:"network"`
 	Token      string `yaml:"token"`
 	PrivateKey string `yaml:"private-key"`
+	RealityOpts clashRealityOpts `yaml:"reality-opts"`
+	WSOpts     clashWSOpts      `yaml:"ws-opts"`
+	GrpcOpts   clashGrpcOpts    `yaml:"grpc-opts"`
+	ClientFP   string           `yaml:"client-fingerprint"`
+}
+
+type clashRealityOpts struct {
+	PublicKey string `yaml:"public-key"`
+	ShortID   string `yaml:"short-id"`
+	SpiderX   string `yaml:"spider-x"`
+}
+type clashWSOpts struct {
+	Path    string            `yaml:"path"`
+	Headers map[string]string `yaml:"headers"`
+}
+type clashGrpcOpts struct {
+	GrpcServiceName string `yaml:"grpc-service-name"`
+}
+
+// fillClashExtra lifts Clash-specific reality/transport fields into n.Extra so
+// the sing-box/clash/v2rayn generators (which read n.Extra) can emit them.
+func fillClashExtra(p clashProxy, n *model.Node) {
+	ex := map[string]string{}
+	if n.Network != "" && n.Network != "tcp" {
+		switch n.Network {
+		case "ws":
+			if p.WSOpts.Path != "" {
+				ex["path"] = p.WSOpts.Path
+			}
+			if p.WSOpts.Headers != nil {
+				if h := p.WSOpts.Headers["Host"]; h != "" {
+					ex["host"] = h
+				}
+			}
+		case "grpc":
+			if p.GrpcOpts.GrpcServiceName != "" {
+				ex["serviceName"] = p.GrpcOpts.GrpcServiceName
+			}
+		}
+	}
+	if p.RealityOpts.PublicKey != "" {
+		n.Security = "reality"
+		ex["pbk"] = p.RealityOpts.PublicKey
+		if p.RealityOpts.ShortID != "" {
+			ex["sid"] = p.RealityOpts.ShortID
+		}
+		if p.RealityOpts.SpiderX != "" {
+			ex["spx"] = p.RealityOpts.SpiderX
+		}
+	}
+	if p.ClientFP != "" {
+		ex["fp"] = p.ClientFP
+	}
+	sni := p.ServerName
+	if sni == "" {
+		sni = p.SNI
+	}
+	if sni != "" {
+		ex["sni"] = sni
+	}
+	if p.Flow != "" {
+		n.Flow = p.Flow
+		ex["flow"] = p.Flow
+	}
+	if len(ex) > 0 {
+		n.Extra = ex
+	}
 }
 
 type clashConfig struct {
@@ -598,12 +667,36 @@ func clashToNode(p clashProxy) *model.Node {
 	case model.SchemeWireGuard:
 		n.User = p.PrivateKey
 	}
+	fillClashExtra(p, n)
 	return n
 }
 
 // ---------------------------------------------------------------------------
 // sing-box JSON
 // ---------------------------------------------------------------------------
+
+type sbTLS struct {
+	Enabled    bool      `json:"enabled"`
+	ServerName string    `json:"server_name"`
+	Reality    sbReality `json:"reality"`
+	UTLS       sbUTLS    `json:"utls"`
+}
+type sbReality struct {
+	Enabled   bool   `json:"enabled"`
+	PublicKey string `json:"public_key"`
+	ShortID   string `json:"short_id"`
+	SpiderX   string `json:"spider_x"`
+}
+type sbUTLS struct {
+	Fingerprint string `json:"fingerprint"`
+}
+type sbTransport struct {
+	Type        string            `json:"type"`
+	Path        string            `json:"path"`
+	Host        string            `json:"host"`
+	Headers     map[string]string `json:"headers"`
+	ServiceName string            `json:"service_name"`
+}
 
 type sbOutbound struct {
 	Type       string          `json:"type"`
@@ -615,8 +708,71 @@ type sbOutbound struct {
 	Method     string          `json:"method"`
 	Plugin     string          `json:"plugin"`
 	TLS        json.RawMessage `json:"tls"`
+	Transport  json.RawMessage `json:"transport"`
 	Token      string          `json:"token"`
 	PrivateKey string          `json:"private_key"`
+	Flow       string          `json:"flow"`
+}
+
+// fillSBExtra lifts sing-box-specific reality/transport fields into n.Extra so
+// the generators (which read n.Extra) can emit them.
+func fillSBExtra(o sbOutbound, n *model.Node) {
+	var tls sbTLS
+	if len(o.TLS) > 0 && string(o.TLS) != "null" && string(o.TLS) != "false" {
+		_ = json.Unmarshal(o.TLS, &tls)
+	}
+	var tr sbTransport
+	if len(o.Transport) > 0 {
+		_ = json.Unmarshal(o.Transport, &tr)
+	}
+	ex := map[string]string{}
+	if tr.Type != "" && tr.Type != "tcp" {
+		n.Network = tr.Type
+		switch tr.Type {
+		case "ws":
+			if tr.Path != "" {
+				ex["path"] = tr.Path
+			}
+			host := tr.Host
+			if host == "" && tr.Headers != nil {
+				host = tr.Headers["Host"]
+			}
+			if host != "" {
+				ex["host"] = host
+			}
+		case "grpc":
+			if tr.ServiceName != "" {
+				ex["serviceName"] = tr.ServiceName
+			}
+		}
+	} else if n.Network == "" {
+		n.Network = "tcp"
+	}
+	if tls.Reality.Enabled && tls.Reality.PublicKey != "" {
+		n.Security = "reality"
+		ex["pbk"] = tls.Reality.PublicKey
+		if tls.Reality.ShortID != "" {
+			ex["sid"] = tls.Reality.ShortID
+		}
+		if tls.Reality.SpiderX != "" {
+			ex["spx"] = tls.Reality.SpiderX
+		}
+	} else if tls.Enabled {
+		n.Security = "tls"
+	}
+	if tls.UTLS.Fingerprint != "" {
+		ex["fp"] = tls.UTLS.Fingerprint
+	}
+	if tls.ServerName != "" {
+		ex["sni"] = tls.ServerName
+	}
+	if o.Flow != "" {
+		n.Flow = o.Flow
+		ex["flow"] = o.Flow
+	}
+	if len(ex) > 0 {
+		n.Extra = ex
+	}
 }
 
 type sbConfig struct {
@@ -685,5 +841,6 @@ func sbToNode(o sbOutbound) *model.Node {
 	case model.SchemeWireGuard:
 		n.User = o.PrivateKey
 	}
+	fillSBExtra(o, n)
 	return n
 }

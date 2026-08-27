@@ -109,7 +109,12 @@ func (c *Controller) buildConfig(nodes []model.Node) []byte {
 		"external-controller": fmt.Sprintf("127.0.0.1:%d", c.ecPort),
 		"secret":             c.secret,
 		"mode":               "global",
-		"proxies":            proxies,
+		// Normalize RTT across proxy types (strips handshake variance) and dial
+		// all resolved IPs concurrently — the same settings production url-test
+		// groups use, so measured latency matches what the client will see.
+		"unified-delay":  true,
+		"tcp-concurrent": true,
+		"proxies":        proxies,
 	}
 	// mihomo rejects a selector group with an empty `proxies` list, so only
 	// emit the OUT group once at least one proxy exists. Start() runs before
