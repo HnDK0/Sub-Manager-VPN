@@ -15,47 +15,47 @@ import (
 // Settings mirrors the runtime knobs persisted to config.json. JSON tags use
 // snake_case so the on-disk file stays human-readable.
 type Settings struct {
-	StatePath        string   `json:"state_path"`
-	SourcesPath      string   `json:"sources_path"`
-	AssetsDir        string   `json:"assets_dir"`
-	OutDir           string   `json:"out_dir"`
-	Interval         string   `json:"interval"` // e.g. "2h"
-	TopN             int      `json:"topn"`
-	DegradeMs        int      `json:"degrade_ms"`
-	MinKeep          int      `json:"minkeep"`
-	ServeAddr        string   `json:"serve_addr"`
-	ServeToken       string   `json:"serve_token"`
-	WebAddr          string   `json:"web_addr"`
-	WebToken         string   `json:"web_token"`
-	WebSecret        string   `json:"web_secret"`
-	CorpseCycles     int      `json:"corpse_cycles"`
-	ProbeURL         string   `json:"probe_url"`
-	SpeedTestURL     string   `json:"speed_test_url"`
-	MinSpeedMbps     int      `json:"min_speed_mbps"`
-	SpeedTestTopN    int      `json:"speed_test_topn"`
-	ExcludeCountries []string `json:"exclude_countries"`
-	ExcludeProtocols []string `json:"exclude_protocols"`
-	Workers          int      `json:"workers"`
-	ProbeTimeoutMs   int      `json:"probe_timeout_ms"`
-	MaxPingMs        int      `json:"max_ping_ms"`
-	SubValidityInterval string `json:"sub_validity_interval"` // e.g. "5m"
-	SubPingInterval    string `json:"sub_ping_interval"`      // e.g. "30m"
-	SubTopN            int    `json:"sub_topn"`               // 0 = use TopN
+	StatePath   string `json:"state_path"`
+	SourcesPath string `json:"sources_path"`
+	AssetsDir   string `json:"assets_dir"`
+	OutDir      string `json:"out_dir"`
+	Interval    string `json:"interval"` // e.g. "2h"
+	TopN        int    `json:"topn"`
+	DegradeMs   int    `json:"degrade_ms"`
+	MinKeep     int    `json:"minkeep"`
+	ServeAddr   string `json:"serve_addr"`
+	ServeToken  string `json:"serve_token"`
+	WebAddr     string `json:"web_addr"`
+	WebToken    string `json:"web_token"`
+	WebSecret   string `json:"web_secret"`
+
+	ProbeURL            string   `json:"probe_url"`
+	SpeedTestURL        string   `json:"speed_test_url"`
+	MinSpeedMbps        int      `json:"min_speed_mbps"`
+	SpeedTestTopN       int      `json:"speed_test_topn"`
+	ExcludeCountries    []string `json:"exclude_countries"`
+	ExcludeProtocols    []string `json:"exclude_protocols"`
+	Workers             int      `json:"workers"`
+	ProbeTimeoutMs      int      `json:"probe_timeout_ms"`
+	MaxPingMs           int      `json:"max_ping_ms"`
+	SubValidityInterval string   `json:"sub_validity_interval"` // e.g. "5m"
+	SubPingInterval     string   `json:"sub_ping_interval"`     // e.g. "30m"
+	SubTopN             int      `json:"sub_topn"`              // 0 = use TopN
 }
 
 // Default returns the non-path defaults. Paths are left empty; the caller (main)
 // fills them from the user config dir.
 func Default() Settings {
 	return Settings{
-		Interval:     "2h",
-		TopN:         5,
-		DegradeMs:    0,
-		MinKeep:      1,
-		CorpseCycles: 5,
-		Workers:      350,
-		ProbeTimeoutMs: 2000,
+		Interval:  "2h",
+		TopN:      5,
+		DegradeMs: 0,
+		MinKeep:   1,
+
+		Workers:             350,
+		ProbeTimeoutMs:      2000,
 		SubValidityInterval: "5m",
-		SubPingInterval:    "30m",
+		SubPingInterval:     "30m",
 	}
 }
 

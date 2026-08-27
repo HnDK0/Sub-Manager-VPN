@@ -44,10 +44,6 @@ type Config struct {
 	TopN      int
 	DegradeMs int
 	MinKeep   int
-	// CorpseCycles is the number of consecutive dead cycles after which a node
-	// is treated as a corpse and skipped on the next ping to save budget. Zero
-	// defaults to 5; a non-positive value disables corpse-skipping entirely.
-	CorpseCycles int
 	// ProbeURL is fetched (HTTP GET) through the proxy egress to measure real
 	// RTT. Empty uses the engine default (gstatic generate_204).
 	ProbeURL string
@@ -212,12 +208,12 @@ type Scheduler struct {
 
 	// Three timers, each with its own derived context + WaitGroup so Stop can
 	// wait for all of them cleanly.
-	commonTimer  *time.Ticker
-	validTimer   *time.Ticker
-	pingTimer    *time.Ticker
-	timerWG      sync.WaitGroup
-	stopMu       sync.Mutex
-	stopped      bool
+	commonTimer *time.Ticker
+	validTimer  *time.Ticker
+	pingTimer   *time.Ticker
+	timerWG     sync.WaitGroup
+	stopMu      sync.Mutex
+	stopped     bool
 
 	statusMu sync.RWMutex
 	status   Snapshot
@@ -242,9 +238,6 @@ func New(cfg Config) (*Scheduler, error) {
 	}
 	if cfg.DegradeMs < 0 {
 		cfg.DegradeMs = 0
-	}
-	if cfg.CorpseCycles == 0 {
-		cfg.CorpseCycles = 5
 	}
 	if cfg.Workers <= 0 || cfg.Workers < 16 {
 		cfg.Workers = 350
@@ -273,11 +266,11 @@ func New(cfg Config) (*Scheduler, error) {
 	}
 	geoMgr := geoNew(cfg.AssetsDir)
 	engine := engineNew(mihomo.Options{
-		ProbeURL:      cfg.ProbeURL,
-		SpeedTestURL:  cfg.SpeedTestURL,
-		MinSpeedMbps:  cfg.MinSpeedMbps,
-		SpeedTestTopN: cfg.SpeedTestTopN,
-		Workers:       cfg.Workers,
+		ProbeURL:       cfg.ProbeURL,
+		SpeedTestURL:   cfg.SpeedTestURL,
+		MinSpeedMbps:   cfg.MinSpeedMbps,
+		SpeedTestTopN:  cfg.SpeedTestTopN,
+		Workers:        cfg.Workers,
 		ProbeTimeoutMs: cfg.ProbeTimeoutMs,
 	})
 
@@ -539,32 +532,6 @@ func (s *Scheduler) ProbeNodes(ctx context.Context, nodes []model.Node) (map[str
 	return s.ProbeFn(ctx, nodes)
 }
 
-// filterCorpses drops nodes that have been dead for at least CorpseCycles
-// consecutive cycles (corpses), so the scheduler stops wasting ping budget on
-// nodes that are effectively gone. New nodes (no results yet) are always
-// probed, and the threshold can be disabled via a non-positive CorpseCycles.
-func (s *Scheduler) filterCorpses(nodes []model.Node) []model.Node {
-	if s.cfg.CorpseCycles <= 0 {
-		return nodes
-	}
-	out := make([]model.Node, 0, len(nodes))
-	for _, n := range nodes {
-		id, err := s.st.NodeID(nodeHash(&n))
-		if err != nil {
-			// Unknown node — always probe it.
-			out = append(out, n)
-			continue
-		}
-		streak, err := s.st.ConsecutiveDead(id)
-		if err != nil || streak < s.cfg.CorpseCycles {
-			out = append(out, n)
-			continue
-		}
-		log.Printf("scheduler: skipping corpse node %s:%d (dead %d cycles)", n.Host, n.Port, streak)
-	}
-	return out
-}
-
 // Run executes one Cycle immediately, then repeats on three independent timers
 // until ctx is cancelled: CommonScan (Interval), SubValidity (SubValidityInterval),
 // and SubPing (SubPingInterval). It always calls Stop on the way out.
@@ -766,10 +733,7 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 		})
 	}
 
-	// Skip nodes dead for many consecutive cycles (corpses) to save ping budget.
-	nodes = s.filterCorpses(nodes)
-
-	// Geo-resolve + upsert each remaining node into state.
+	// Geo-resolve + upsert each node into state.
 	s.setStatus(func(st *Snapshot) {
 		st.Phase = PhaseGeo
 		st.NodesGeoTotal = len(nodes)
@@ -861,16 +825,13 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 		probeNodes = append(probeNodes, n)
 	}
 
-	results := make(map[string]mihomo.Result)
 	if len(probeNodes) > 0 {
 		if err := s.engine.SyncNodes(probeNodes); err != nil {
 			log.Printf("scheduler: sync nodes: %v", err)
 		}
-		r, e := s.ProbeFn(cctx, probeNodes)
-		if e != nil {
+		if _, e := s.ProbeFn(cctx, probeNodes); e != nil {
 			return fmt.Errorf("scheduler: probe: %w", e)
 		}
-		results = r
 	}
 
 	// ponytail: probe results are now persisted live inside defaultProbe, as
@@ -897,25 +858,32 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 	// Drop nodes whose resolved country is in the exclude list so they can
 	// never reach a generated subscription (safety net; they were already
 	// skipped at probe time above).
+	// Build candidates from the persisted latest measurement. A node keeps its
+	// last-known liveness if this cycle's probe errored, so a transient infra
+	// blip can't silently drop it from the subscription.
 	var cands []selector.Candidate
 	floorKbps := s.cfg.MinSpeedMbps * 1000
 	for _, en := range enrichedNodes {
-		r, ok := results[en.hash]
-		if !ok || !r.Alive {
-			continue
-		}
 		if s.cfg.IsBanned != nil && s.cfg.IsBanned(en.hash) {
 			continue
 		}
 		if exclude[strings.ToUpper(en.country)] {
 			continue
 		}
-		if floorKbps > 0 && r.SpeedKbps < int64(floorKbps) {
+		id, e := s.st.NodeID(en.hash)
+		if e != nil {
+			continue
+		}
+		lr, e2 := s.st.LatestResult(id)
+		if e2 != nil || !lr.Alive {
+			continue
+		}
+		if floorKbps > 0 && lr.SpeedKbps < floorKbps {
 			continue
 		}
 		cands = append(cands, selector.Candidate{
 			Node:      en.n,
-			LatencyMs: int(r.LatencyMs),
+			LatencyMs: lr.LatencyMs,
 			Country:   en.country,
 		})
 	}

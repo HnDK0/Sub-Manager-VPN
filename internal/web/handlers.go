@@ -110,7 +110,7 @@ func (s *Server) buildStatus() map[string]any {
 			"dead":      total - alive,
 			"countries": len(countries),
 		},
-		"sources": len(sources),
+		"sources":      len(sources),
 		"subscription": s.sch.SubStatus(),
 	}
 }
@@ -136,17 +136,17 @@ func (s *Server) nodeViews() ([]NodeView, error) {
 	var out []NodeView
 	for rows.Next() {
 		var (
-			id        int64
-			hash      string
-			name      string
-			normName  string
-			host      string
-			port      int
-			country   string
-			proto     string
-			alive     int
-			latency   int
-			speed     int
+			id       int64
+			hash     string
+			name     string
+			normName string
+			host     string
+			port     int
+			country  string
+			proto    string
+			alive    int
+			latency  int
+			speed    int
 		)
 		if err := rows.Scan(&id, &hash, &name, &normName, &host, &port, &country, &proto, &alive, &latency, &speed); err != nil {
 			return nil, fmt.Errorf("web: scan node: %w", err)
@@ -559,16 +559,16 @@ func (s *Server) handleSubList(w http.ResponseWriter, r *http.Request) {
 	for _, row := range rows {
 		v := viewByHash[row.NodeID]
 		out = append(out, map[string]any{
-			"hash":          row.NodeID,
-			"name":          v.Name,
-			"country":       v.Country,
-			"protocol":      v.Protocol,
-			"alive":         v.Alive,
-			"latencyMs":     v.LatencyMs,
-			"speedKbps":     v.SpeedKbps,
-			"validCheckedAt":  row.ValidCheckedAt,
-			"pingLatencyMs":   row.PingLatencyMs,
-			"pingCheckedAt":   row.PingCheckedAt,
+			"hash":           row.NodeID,
+			"name":           v.Name,
+			"country":        v.Country,
+			"protocol":       v.Protocol,
+			"alive":          v.Alive,
+			"latencyMs":      v.LatencyMs,
+			"speedKbps":      v.SpeedKbps,
+			"validCheckedAt": row.ValidCheckedAt,
+			"pingLatencyMs":  row.PingLatencyMs,
+			"pingCheckedAt":  row.PingCheckedAt,
 		})
 	}
 	writeJSON(w, map[string]any{"members": out, "total": len(out)})
@@ -767,21 +767,19 @@ func (s *Server) handleNodeConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hash := parts[0]
-	for _, n := range s.sch.CachedNodes() {
-		if hashNode(n) != hash {
-			continue
-		}
-		uri, err := selector.NodeURI(n)
-		if err != nil {
-			writeJSONErrorLog(w, http.StatusInternalServerError, "failed to build node uri", err)
-			return
-		}
-		writeJSON(w, map[string]any{
-			"hash": hash,
-			"name": selector.NormName(n),
-			"uri":  uri,
-		})
+	n, err := s.st.NodeByHash(hash)
+	if err != nil {
+		writeJSONError(w, http.StatusNotFound, "not found")
 		return
 	}
-	writeJSONError(w, http.StatusNotFound, "not found")
+	uri, err := selector.NodeURI(n)
+	if err != nil {
+		writeJSONErrorLog(w, http.StatusInternalServerError, "failed to build node uri", err)
+		return
+	}
+	writeJSON(w, map[string]any{
+		"hash": hash,
+		"name": selector.NormName(n),
+		"uri":  uri,
+	})
 }

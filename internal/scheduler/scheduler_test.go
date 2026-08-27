@@ -279,18 +279,19 @@ func TestDegradeNoSwapWhenHealthy(t *testing.T) {
 	}
 }
 
-// TestCorpseSkip verifies that a node dead for CorpseCycles consecutive cycles
-// is skipped on the next ping, while a fresh node is still probed.
-func TestCorpseSkip(t *testing.T) {
+// TestCorpseStillProbed documents variant A: nodes dead for many consecutive
+// cycles are still probed every cycle (no corpse-skipping), so the subscription
+// pool can never silently starve. A fresh node and a long-dead node are both
+// probed.
+func TestCorpseStillProbed(t *testing.T) {
 	dir := t.TempDir()
 	cfg := Config{
-		StatePath:    filepath.Join(dir, "state.db"),
-		SourcesPath:  filepath.Join(dir, "sources.txt"),
-		AssetsDir:    filepath.Join(dir, "assets"),
-		OutDir:       filepath.Join(dir, "out"),
-		TopN:         5,
-		MinKeep:      1,
-		CorpseCycles: 5,
+		StatePath:   filepath.Join(dir, "state.db"),
+		SourcesPath: filepath.Join(dir, "sources.txt"),
+		AssetsDir:   filepath.Join(dir, "assets"),
+		OutDir:      filepath.Join(dir, "out"),
+		TopN:        5,
+		MinKeep:     1,
 	}
 	s, _ := withTestScheduler(t, cfg)
 	enabledSource(t, s)
@@ -334,8 +335,8 @@ func TestCorpseSkip(t *testing.T) {
 		t.Fatalf("Cycle: %v", err)
 	}
 
-	if got := atomic.LoadInt32(&probed); got != 1 {
-		t.Fatalf("expected only the live node to be probed (corpse skipped), got %d probes", got)
+	if got := atomic.LoadInt32(&probed); got != 2 {
+		t.Fatalf("expected both nodes probed (variant A: no corpse-skip), got %d probes", got)
 	}
 }
 

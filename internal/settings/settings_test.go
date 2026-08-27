@@ -18,7 +18,7 @@ func TestLoadMissingReturnsDefault(t *testing.T) {
 	}
 	d := Default()
 	if s.Interval != d.Interval || s.TopN != d.TopN || s.DegradeMs != d.DegradeMs ||
-		s.MinKeep != d.MinKeep || s.CorpseCycles != d.CorpseCycles {
+		s.MinKeep != d.MinKeep {
 		t.Fatalf("expected default, got %+v", s)
 	}
 	if len(s.ExcludeCountries) != 0 {
@@ -30,13 +30,12 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "config.json")
 	in := Settings{
-		StatePath:    "/x/state.db",
-		WebAddr:      "127.0.0.1:8090",
-		WebToken:     "tok",
-		WebSecret:    "secretsecretsecretsecret1234",
-		Interval:     "15m",
-		TopN:         4,
-		CorpseCycles: 3,
+		StatePath: "/x/state.db",
+		WebAddr:   "127.0.0.1:8090",
+		WebToken:  "tok",
+		WebSecret: "secretsecretsecretsecret1234",
+		Interval:  "15m",
+		TopN:      4,
 	}
 	if err := Save(p, in); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -65,7 +64,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 	if out.StatePath != in.StatePath || out.WebAddr != in.WebAddr || out.WebToken != in.WebToken ||
 		out.WebSecret != in.WebSecret || out.Interval != in.Interval || out.TopN != in.TopN ||
-		out.CorpseCycles != in.CorpseCycles || len(out.ExcludeCountries) != len(in.ExcludeCountries) {
+		len(out.ExcludeCountries) != len(in.ExcludeCountries) {
 		t.Fatalf("round-trip mismatch: %+v vs %+v", in, out)
 	}
 }

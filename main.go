@@ -23,33 +23,33 @@ import (
 
 // Config holds the runtime knobs parsed from CLI flags.
 type Config struct {
-	StatePath        string
-	SourcesPath      string // plain-text sources whitelist (separate from state DB)
-	AssetsDir        string
-	OutDir           string
-	Interval         time.Duration
-	TopN             int
-	DegradeMs        int
-	MinKeep          int
-	SeedFile         string   // optional: newline-separated source URLs to seed (replace list) then exit
-	ServeAddr        string   // subscription HTTP server listen addr (loopback); empty disables
-	ServeToken       string   // secret token for /s/<token>/ hidden path; empty = direct /<file>
-	WebAddr          string   // web management UI listen addr
-	WebToken         string   // required token for the web management UI
-	WebSecret        string   // secret path prefix (>=24 chars) hiding the admin UI
-	CorpseCycles     int      // corpse-skip cycles; 0 disables
-	ProbeURL         string   // HTTP GET target for real RTT (empty -> engine default)
-	SpeedTestURL     string   // HTTP download target for throughput (empty disables)
-	MinSpeedMbps     int      // throughput floor for the speed brake (0 disables)
-	SpeedTestTopN    int      // MB cap for the speed sample download
-	ExcludeCountries []string // ISO codes excluded from subscriptions (e.g. ru,cn)
-	ExcludeProtocols []string // schemes excluded from probing/subscriptions (e.g. vmess,trojan)
-	Workers          int      // probe worker-pool size (in-process mihomo concurrency); clamped [16,512], default 350
-	ProbeTimeoutMs   int      // per-URLTest timeout (ms); 0 = engine default 2000
-	MaxPingMs        int      // drop nodes slower than this (ms) from the served subscription; 0 disables
+	StatePath   string
+	SourcesPath string // plain-text sources whitelist (separate from state DB)
+	AssetsDir   string
+	OutDir      string
+	Interval    time.Duration
+	TopN        int
+	DegradeMs   int
+	MinKeep     int
+	SeedFile    string // optional: newline-separated source URLs to seed (replace list) then exit
+	ServeAddr   string // subscription HTTP server listen addr (loopback); empty disables
+	ServeToken  string // secret token for /s/<token>/ hidden path; empty = direct /<file>
+	WebAddr     string // web management UI listen addr
+	WebToken    string // required token for the web management UI
+	WebSecret   string // secret path prefix (>=24 chars) hiding the admin UI
+
+	ProbeURL            string   // HTTP GET target for real RTT (empty -> engine default)
+	SpeedTestURL        string   // HTTP download target for throughput (empty disables)
+	MinSpeedMbps        int      // throughput floor for the speed brake (0 disables)
+	SpeedTestTopN       int      // MB cap for the speed sample download
+	ExcludeCountries    []string // ISO codes excluded from subscriptions (e.g. ru,cn)
+	ExcludeProtocols    []string // schemes excluded from probing/subscriptions (e.g. vmess,trojan)
+	Workers             int      // probe worker-pool size (in-process mihomo concurrency); clamped [16,512], default 350
+	ProbeTimeoutMs      int      // per-URLTest timeout (ms); 0 = engine default 2000
+	MaxPingMs           int      // drop nodes slower than this (ms) from the served subscription; 0 disables
 	SubValidityInterval time.Duration
-	SubPingInterval    time.Duration
-	SubTopN            int
+	SubPingInterval     time.Duration
+	SubTopN             int
 }
 
 // main parses flags, builds the Config, and delegates all wiring to run so it
@@ -87,7 +87,6 @@ func main() {
 		WebAddr:          cfg.WebAddr,
 		WebToken:         cfg.WebToken,
 		WebSecret:        cfg.WebSecret,
-		CorpseCycles:     cfg.CorpseCycles,
 		ProbeURL:         cfg.ProbeURL,
 		SpeedTestURL:     cfg.SpeedTestURL,
 		MinSpeedMbps:     cfg.MinSpeedMbps,
@@ -170,7 +169,7 @@ func parseFlags() (Config, string) {
 	webAddr := flag.String("web-addr", dfltStr(existed, loaded.WebAddr, "127.0.0.1:8090"), "web management UI listen addr")
 	webToken := flag.String("web-token", loaded.WebToken, "required token for the web management UI")
 	webSecret := flag.String("web-secret", loaded.WebSecret, "secret path prefix (>=24 chars / 12+12) hiding the admin UI; all UI+API mounted under http://<addr>/<secret>/")
-	corpseCycles := flag.Int("corpse", dfltInt(existed, loaded.CorpseCycles, 5), "corpse-skip cycles; 0 disables")
+
 	probeURL := flag.String("probe-url", dfltStr(existed, loaded.ProbeURL, ""), "HTTP GET target for real RTT measurement (empty -> engine default)")
 	speedTestURL := flag.String("speed-test-url", dfltStr(existed, loaded.SpeedTestURL, ""), "HTTP download target for throughput (empty disables speed measurement)")
 	minSpeedMbps := flag.Int("min-speed-mbps", dfltInt(existed, loaded.MinSpeedMbps, 0), "throughput floor (Mbps) for the speed brake; 0 disables")
@@ -206,30 +205,29 @@ func parseFlags() (Config, string) {
 	}
 
 	return Config{
-		StatePath:        *statePath,
-		SourcesPath:      *sourcesPath,
-		AssetsDir:        *assetsDir,
-		OutDir:           *outDir,
-		Interval:         *interval,
-		TopN:             n,
-		DegradeMs:        *degrade,
-		MinKeep:          *minkeep,
-		SeedFile:         *seed,
-		ServeAddr:        *serveAddr,
-		ServeToken:       *serveToken,
-		WebAddr:          *webAddr,
-		WebToken:         *webToken,
-		WebSecret:        *webSecret,
-		CorpseCycles:     *corpseCycles,
-		ProbeURL:         *probeURL,
-		SpeedTestURL:     *speedTestURL,
-		MinSpeedMbps:     *minSpeedMbps,
-		SpeedTestTopN:    *speedTestTopN,
-		ExcludeCountries: excl,
-		ExcludeProtocols: exclP,
-		Workers:          *workers,
-		ProbeTimeoutMs:   *probeTimeout,
-		MaxPingMs:        *maxPing,
+		StatePath:           *statePath,
+		SourcesPath:         *sourcesPath,
+		AssetsDir:           *assetsDir,
+		OutDir:              *outDir,
+		Interval:            *interval,
+		TopN:                n,
+		DegradeMs:           *degrade,
+		MinKeep:             *minkeep,
+		SeedFile:            *seed,
+		ServeAddr:           *serveAddr,
+		ServeToken:          *serveToken,
+		WebAddr:             *webAddr,
+		WebToken:            *webToken,
+		WebSecret:           *webSecret,
+		ProbeURL:            *probeURL,
+		SpeedTestURL:        *speedTestURL,
+		MinSpeedMbps:        *minSpeedMbps,
+		SpeedTestTopN:       *speedTestTopN,
+		ExcludeCountries:    excl,
+		ExcludeProtocols:    exclP,
+		Workers:             *workers,
+		ProbeTimeoutMs:      *probeTimeout,
+		MaxPingMs:           *maxPing,
 		SubValidityInterval: *subValidity,
 		SubPingInterval:     *subPing,
 		SubTopN:             *subTopN,
@@ -340,28 +338,27 @@ func runInner(ctx context.Context, cfg Config, sch *scheduler.Scheduler, skipUI 
 	// 3. Build scheduler config and scheduler (if not injected).
 	bansStore := bans.New(filepath.Join(filepath.Dir(configPath), "bans.json"))
 	schedCfg := scheduler.Config{
-		StatePath:        cfg.StatePath,
-		SourcesPath:      cfg.SourcesPath,
-		AssetsDir:        cfg.AssetsDir,
-		OutDir:           cfg.OutDir,
-		Interval:         cfg.Interval,
-		TopN:             cfg.TopN,
-		DegradeMs:        cfg.DegradeMs,
-		MinKeep:          cfg.MinKeep,
-		CorpseCycles:     cfg.CorpseCycles,
-		ProbeURL:         cfg.ProbeURL,
-		SpeedTestURL:     cfg.SpeedTestURL,
-		MinSpeedMbps:     cfg.MinSpeedMbps,
-		SpeedTestTopN:    cfg.SpeedTestTopN,
-		ExcludeCountries: cfg.ExcludeCountries,
-		ExcludeProtocols: cfg.ExcludeProtocols,
-		Workers:          cfg.Workers,
-		ProbeTimeoutMs:   cfg.ProbeTimeoutMs,
-		MaxPingMs:        cfg.MaxPingMs,
+		StatePath:           cfg.StatePath,
+		SourcesPath:         cfg.SourcesPath,
+		AssetsDir:           cfg.AssetsDir,
+		OutDir:              cfg.OutDir,
+		Interval:            cfg.Interval,
+		TopN:                cfg.TopN,
+		DegradeMs:           cfg.DegradeMs,
+		MinKeep:             cfg.MinKeep,
+		ProbeURL:            cfg.ProbeURL,
+		SpeedTestURL:        cfg.SpeedTestURL,
+		MinSpeedMbps:        cfg.MinSpeedMbps,
+		SpeedTestTopN:       cfg.SpeedTestTopN,
+		ExcludeCountries:    cfg.ExcludeCountries,
+		ExcludeProtocols:    cfg.ExcludeProtocols,
+		Workers:             cfg.Workers,
+		ProbeTimeoutMs:      cfg.ProbeTimeoutMs,
+		MaxPingMs:           cfg.MaxPingMs,
 		SubValidityInterval: cfg.SubValidityInterval,
 		SubPingInterval:     cfg.SubPingInterval,
 		SubTopN:             cfg.SubTopN,
-		IsBanned:         bansStore.Has,
+		IsBanned:            bansStore.Has,
 	}
 	if sch == nil {
 		sch, err = scheduler.New(schedCfg)
