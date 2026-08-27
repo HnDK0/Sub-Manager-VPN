@@ -1211,18 +1211,25 @@ func (s *Scheduler) SubValidity(ctx context.Context) error {
 		}(it)
 	}
 	wg.Wait()
-	// Serial post-processing: DB writes + ReplaceRoutine must stay serial.
+	// Serial post-processing: collect aliveness writes and apply them in chunked
+	// DB transactions (one per chunk) instead of one transaction per node, so we
+	// don't acquire the SQLite write lock N times and contend with CommonScan
+	// (SQLITE_BUSY). ReplaceRoutine stays per-node (only dead members).
+	var checked []string
 	for _, pr := range results {
 		if pr.perr != nil {
 			continue
 		}
-		if err := s.st.SetSubValidChecked(pr.m.NodeID, time.Now().Unix()); err != nil {
-			log.Printf("scheduler: set sub valid checked %s: %v", pr.m.NodeID, err)
-		}
+		checked = append(checked, pr.m.NodeID)
 		if !pr.res.Alive {
 			if err := s.ReplaceRoutine(pr.m.NodeID); err != nil {
 				log.Printf("scheduler: replace routine %s: %v", pr.m.NodeID, err)
 			}
+		}
+	}
+	if len(checked) > 0 {
+		if err := s.st.SetSubValidCheckedBatch(checked, time.Now().Unix()); err != nil {
+			log.Printf("scheduler: set sub valid checked batch: %v", err)
 		}
 	}
 	return nil
@@ -1303,15 +1310,20 @@ func (s *Scheduler) SubPing(ctx context.Context) error {
 		}(it)
 	}
 	wg.Wait()
-	// Serial post-processing: SetSubPing + single regenerateSubs at the end.
+	// Serial post-processing: batch SetSubPing into chunked transactions (one per
+	// chunk) instead of one transaction per node, then regenerateSubs once.
+	var pings []state.SubPingRow
 	for _, pr := range results {
 		if pr.perr != nil {
 			continue
 		}
-		if e := s.st.SetSubPing(pr.m.NodeID, int(pr.res.LatencyMs), time.Now().Unix()); e != nil {
-			log.Printf("scheduler: set sub ping %s: %v", pr.m.NodeID, e)
-		}
+		pings = append(pings, state.SubPingRow{NodeHash: pr.m.NodeID, LatencyMs: int(pr.res.LatencyMs)})
 		changed = true
+	}
+	if len(pings) > 0 {
+		if err := s.st.SetSubPingBatch(pings, time.Now().Unix()); err != nil {
+			log.Printf("scheduler: set sub ping batch: %v", err)
+		}
 	}
 	if changed {
 		if err := s.regenerateSubs(); err != nil {

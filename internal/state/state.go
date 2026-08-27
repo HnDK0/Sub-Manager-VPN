@@ -1026,18 +1026,82 @@ func (s *State) RemoveSubscription(nodeHash string) error {
 	return nil
 }
 
-// SetSubValidChecked records the last aliveness check time for a member.
-func (s *State) SetSubValidChecked(nodeHash string, ts int64) error {
-	if _, err := s.db.Exec(`UPDATE subscription SET valid_checked_at = ? WHERE node_id = ?`, ts, nodeHash); err != nil {
-		return fmt.Errorf("set sub valid: %w", err)
+// SubPingRow is one batched subscription-latency update.
+type SubPingRow struct {
+	NodeHash  string
+	LatencyMs int
+}
+
+// SetSubValidCheckedBatch records the aliveness check time for many members in
+// chunked transactions. This mirrors RecordResultsBatch: one short transaction
+// per chunk instead of one transaction per node, so SubValidity/SubPing don't
+// acquire the SQLite write lock N times and contend with CommonScan (SQLITE_BUSY).
+func (s *State) SetSubValidCheckedBatch(hashes []string, ts int64) error {
+	const chunk = 2000
+	for start := 0; start < len(hashes); start += chunk {
+		end := start + chunk
+		if end > len(hashes) {
+			end = len(hashes)
+		}
+		if err := s.setSubValidChunk(hashes[start:end], ts); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-// SetSubPing records the latest latency sample for a member.
-func (s *State) SetSubPing(nodeHash string, latencyMs int, ts int64) error {
-	if _, err := s.db.Exec(`UPDATE subscription SET ping_latency_ms = ?, ping_checked_at = ? WHERE node_id = ?`, latencyMs, ts, nodeHash); err != nil {
-		return fmt.Errorf("set sub ping: %w", err)
+func (s *State) setSubValidChunk(hashes []string, ts int64) error {
+	if len(hashes) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin subvalid batch: %w", err)
+	}
+	for _, h := range hashes {
+		if _, err := tx.Exec(`UPDATE subscription SET valid_checked_at = ? WHERE node_id = ?`, ts, h); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("set sub valid: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit subvalid batch: %w", err)
+	}
+	return nil
+}
+
+// SetSubPingBatch records latency samples for many members in chunked
+// transactions (see SetSubValidCheckedBatch for the rationale).
+func (s *State) SetSubPingBatch(rows []SubPingRow, ts int64) error {
+	const chunk = 2000
+	for start := 0; start < len(rows); start += chunk {
+		end := start + chunk
+		if end > len(rows) {
+			end = len(rows)
+		}
+		if err := s.setSubPingChunk(rows[start:end], ts); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *State) setSubPingChunk(rows []SubPingRow, ts int64) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin subping batch: %w", err)
+	}
+	for _, r := range rows {
+		if _, err := tx.Exec(`UPDATE subscription SET ping_latency_ms = ?, ping_checked_at = ? WHERE node_id = ?`, r.LatencyMs, ts, r.NodeHash); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("set sub ping: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit subping batch: %w", err)
 	}
 	return nil
 }
