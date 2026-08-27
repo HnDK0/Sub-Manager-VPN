@@ -66,8 +66,12 @@ func buildProxyYAML(n model.Node) map[string]any {
 			base["flow"] = n.Flow
 		}
 		base["network"] = net
-		if n.Security == "tls" || n.Security == "reality" {
+		if n.Security == "reality" {
 			base["tls"] = true
+		} else if n.Security == "tls" {
+			// Strict cert verification: reject self-signed / mismatched certs so
+			// a node that only "works" with allow_insecure is NOT marked alive.
+			base["tls"] = map[string]any{"enabled": true, "skip-cert-verify": false}
 		}
 		if n.Security == "reality" {
 			ro := map[string]any{}
@@ -99,7 +103,7 @@ func buildProxyYAML(n model.Node) map[string]any {
 		base["cipher"] = cipher
 		base["network"] = net
 		if n.Security == "tls" {
-			base["tls"] = true
+			base["tls"] = map[string]any{"enabled": true, "skip-cert-verify": false}
 		}
 		if fp != "" {
 			base["client-fingerprint"] = fp
@@ -115,6 +119,8 @@ func buildProxyYAML(n model.Node) map[string]any {
 		base["password"] = n.User
 		base["network"] = net
 		base["sni"] = sni
+		// Trojan is always TLS; verify the cert strictly.
+		base["tls"] = map[string]any{"enabled": true, "skip-cert-verify": false}
 		if fp != "" {
 			base["client-fingerprint"] = fp
 		}

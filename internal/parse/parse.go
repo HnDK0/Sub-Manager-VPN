@@ -327,7 +327,13 @@ func parseVLESS(uri, userinfo, hostport, query, fragment string) *model.Node {
 	if n.Security == "" {
 		n.Security = "none"
 	}
-	n.Flow = q.Get("flow")
+	n.Flow = normalizeFlow(q.Get("flow"))
+	// A vless node advertising a vision flow is, by definition, a reality node.
+	// Infer reality so it is probed/emitted as reality (no plain-TLS cert check)
+	// instead of broken plain TLS that mihomo passes but clients reject.
+	if strings.HasPrefix(n.Flow, "xtls-rprx-vision") && n.Security != "reality" {
+		n.Security = "reality"
+	}
 	// ponytail: reality VLESS requires the xtls-rprx-vision flow; sources often
 	// omit it, so default it here so every generator (v2rayn/singbox/clash) and
 	// the web config endpoint emit a connectable node.
@@ -337,6 +343,22 @@ func parseVLESS(uri, userinfo, hostport, query, fragment string) *model.Node {
 	n.Network = q.Get("network")
 	n.Extra = pickExtra(q, "type", "host", "path", "sni", "pbk", "sid", "fp", "spx", "serviceName", "alpn", "authority", "mode", "quicSecurity", "key", "allow_insecure", "congestion_control")
 	return n
+}
+
+// normalizeFlow canonicalizes the VLESS reality flow. Sources routinely ship
+// bogus suffixes (e.g. xtls-rprx-vision-3d76, xtls-rprx-vision-9c1d) that
+// mihomo's probe tolerates but sing-box / v2rayN reject ("unknown version: 72").
+// Collapse any xtls-rprx-vision* to the canonical base; keep the legitimate
+// udp443 variant as-is.
+func normalizeFlow(f string) string {
+	switch f {
+	case "xtls-rprx-vision", "xtls-rprx-vision-udp443":
+		return f
+	}
+	if strings.HasPrefix(f, "xtls-rprx-vision") {
+		return "xtls-rprx-vision"
+	}
+	return f
 }
 
 // ---------------------------------------------------------------------------
@@ -593,8 +615,11 @@ func fillClashExtra(p clashProxy, n *model.Node) {
 		ex["sni"] = sni
 	}
 	if p.Flow != "" {
-		n.Flow = p.Flow
-		ex["flow"] = p.Flow
+		n.Flow = normalizeFlow(p.Flow)
+		ex["flow"] = n.Flow
+	}
+	if strings.HasPrefix(n.Flow, "xtls-rprx-vision") && n.Security != "reality" {
+		n.Security = "reality"
 	}
 	if len(ex) > 0 {
 		n.Extra = ex
@@ -767,8 +792,11 @@ func fillSBExtra(o sbOutbound, n *model.Node) {
 		ex["sni"] = tls.ServerName
 	}
 	if o.Flow != "" {
-		n.Flow = o.Flow
-		ex["flow"] = o.Flow
+		n.Flow = normalizeFlow(o.Flow)
+		ex["flow"] = n.Flow
+	}
+	if strings.HasPrefix(n.Flow, "xtls-rprx-vision") && n.Security != "reality" {
+		n.Security = "reality"
 	}
 	if len(ex) > 0 {
 		n.Extra = ex
