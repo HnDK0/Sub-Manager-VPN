@@ -10,12 +10,15 @@ import (
 // string join is a safe composite key.
 const dedupSep = "\x00"
 
-// key returns the dedup key for a node: Protocol|Host|Port|User|Security|
-// Encryption. Security/Encryption are included so a host:port listed both as
-// secure and insecure survives dedup as two distinct configs (DropInsecure then
-// keeps the secure one) instead of the insecure twin shadowing the secure one.
+// key returns the dedup key for a node: Protocol|Network|Host|Port|User|
+// Security|Encryption. Security/Encryption are included so a host:port listed
+// both as secure and insecure survives dedup as two distinct configs
+// (DropInsecure then keeps the secure one) instead of the insecure twin
+// shadowing the secure one. Network is included so the same endpoint advertised
+// over multiple transports (e.g. ws and grpc) is kept as distinct configs
+// rather than collapsed into one.
 func key(n model.Node) string {
-	return string(n.Protocol) + dedupSep + n.Host + dedupSep +
+	return string(n.Protocol) + dedupSep + n.Network + dedupSep + n.Host + dedupSep +
 		itoa(n.Port) + dedupSep + n.User + dedupSep + n.Security + dedupSep + n.Encryption
 }
 

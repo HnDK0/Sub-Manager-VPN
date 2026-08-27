@@ -50,6 +50,23 @@ func TestDedupDifferentSecurityKeepsSecure(t *testing.T) {
 	}
 }
 
+func TestDedupKeepsTransportVariants(t *testing.T) {
+	// The same endpoint advertised over ws and grpc must survive dedup as two
+	// distinct configs (different Network), not collapse into one — both
+	// transports are valid and some networks only allow one of them.
+	ws := model.Node{Protocol: model.SchemeVLESS, Host: "h", Port: 443, User: "u", Security: "tls", Network: "ws"}
+	grpc := model.Node{Protocol: model.SchemeVLESS, Host: "h", Port: 443, User: "u", Security: "tls", Network: "grpc"}
+	if len(Dedup([]model.Node{ws, grpc})) != 2 {
+		t.Fatal("same endpoint over ws and grpc must not be deduped into one")
+	}
+	// An endpoint offered only over tcp must still dedup with itself.
+	tcpA := model.Node{Protocol: model.SchemeVLESS, Host: "h", Port: 443, User: "u", Security: "tls", Network: "tcp"}
+	tcpB := model.Node{Protocol: model.SchemeVLESS, Host: "h", Port: 443, User: "u", Security: "tls", Network: "tcp"}
+	if len(Dedup([]model.Node{tcpA, tcpB})) != 1 {
+		t.Fatal("identical tcp nodes must still dedup")
+	}
+}
+
 func TestDropInsecure(t *testing.T) {
 	// VLESS security=none -> dropped (plaintext).
 	vlessNone := model.Node{Protocol: model.SchemeVLESS, Host: "h", Port: 1, User: "u", Security: "none"}
