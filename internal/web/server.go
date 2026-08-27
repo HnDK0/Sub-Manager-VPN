@@ -64,6 +64,8 @@ type Server struct {
 
 	sseMu      sync.Mutex
 	sseTickets map[string]time.Time
+
+	nodesGuard sync.Mutex // serializes the async node-views SSE publisher
 }
 
 // New builds a Server. It does not start listening; call Start. store backs the
@@ -212,21 +214,39 @@ func (s *Server) poll(ctx context.Context) {
 				s.hub.Publish(Event{Type: "status", Payload: s.buildStatus()})
 				s.hub.Publish(Event{Type: "pipeline", Payload: snap})
 			}
-			views, err := s.nodeViews()
-			if err == nil {
-				alive := 0
-				for _, v := range views {
-					if v.Alive {
-						alive++
-					}
-				}
-				if len(views) != lastNodes || alive != lastAlive {
-					lastNodes, lastAlive = len(views), alive
-					s.hub.Publish(Event{Type: "nodes", Payload: views})
-				}
-			}
+		// nodeViews runs the expensive nodes⋈results query; publish it off the
+		// publisher goroutine so a stalled DB read (e.g. during a fetch/geo
+		// cycle) can never freeze SSE delivery of status/pipeline.
+		s.publishNodesAsync(&lastNodes, &lastAlive)
 		}
 	}
+}
+
+// publishNodesAsync computes the node views off the publisher goroutine so a
+// slow DB read (e.g. during a heavy fetch/geo cycle) cannot stall SSE delivery
+// of status/pipeline events. A guard skips a tick when a previous computation
+// is still in flight, bounding concurrency to one outstanding query.
+func (s *Server) publishNodesAsync(lastNodes, lastAlive *int) {
+	if !s.nodesGuard.TryLock() {
+		return
+	}
+	go func() {
+		defer s.nodesGuard.Unlock()
+		views, err := s.nodeViews()
+		if err != nil {
+			return
+		}
+		alive := 0
+		for _, v := range views {
+			if v.Alive {
+				alive++
+			}
+		}
+		if len(views) != *lastNodes || alive != *lastAlive {
+			*lastNodes, *lastAlive = len(views), alive
+			s.hub.Publish(Event{Type: "nodes", Payload: views})
+		}
+	}()
 }
 
 // auth enforces the token on a handler (Bearer header primary; ?token= only for
