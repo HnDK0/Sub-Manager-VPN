@@ -133,6 +133,12 @@ func DropInsecure(nodes []model.Node) []model.Node {
 			if n.Security != "tls" && n.Security != "reality" {
 				drop = true
 			}
+			// A reality node with no public key (pbk) is not valid reality: the
+			// probe would disable reality and fall back to plain TLS, falsely
+			// passing a node the client rejects. Drop it here.
+			if n.Security == "reality" && strings.TrimSpace(n.Extra["pbk"]) == "" {
+				drop = true
+			}
 		case model.SchemeVMess, model.SchemeTrojan:
 			// These are plaintext-capable without TLS transport.
 			if n.Security != "tls" {

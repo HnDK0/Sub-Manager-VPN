@@ -171,7 +171,12 @@ func transportNet(n model.Node) string {
 	if net == "" {
 		net = n.Extra["type"]
 	}
-	if net == "" {
+	net = strings.ToLower(strings.TrimSpace(net))
+	// Clash/sing-box/v2rayN can carry a literal "raw" network, meaning "no
+	// transport / plain tcp". mihomo and the generators only understand "tcp",
+	// so normalize raw->tcp to avoid emitting type=raw / network: raw /
+	// transport.type: raw (which clients reject as an unknown transport).
+	if net == "" || net == "raw" {
 		net = "tcp"
 	}
 	return net
