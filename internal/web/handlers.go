@@ -152,7 +152,7 @@ func (s *Server) nodeViews() ([]NodeView, error) {
 			return nil, fmt.Errorf("web: scan node: %w", err)
 		}
 		out = append(out, NodeView{
-			ID: id, Hash: hash, Name: name, NormName: normName, Host: host, Port: port,
+			ID: id, Hash: hash, Name: normName, NormName: normName, Host: host, Port: port,
 			Country: country, Protocol: proto, Alive: alive != 0, LatencyMs: latency, SpeedKbps: speed,
 		})
 	}

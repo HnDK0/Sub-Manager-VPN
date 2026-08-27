@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -200,6 +201,13 @@ func (s *State) migrate() error {
 	// ALTER TABLE has no IF NOT EXISTS; add the display column idempotently.
 	if err := s.addColumnIfNotExists("nodes", "norm_name", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return fmt.Errorf("migration norm_name: %w", err)
+	}
+	// ponytail: node_json stores the full canonical model.Node (credential +
+	// transport) so subscription members and same-country replacements can be
+	// reconstructed into working configs instead of the partial hash/name row
+	// that previously lost the credential and produced broken subscriptions.
+	if err := s.addColumnIfNotExists("nodes", "node_json", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("migration nodes.node_json: %w", err)
 	}
 	// ponytail: speed_kbps added for throughput measurement (REWORK.md).
 	if err := s.addColumnIfNotExists("nodes", "speed_kbps", "INTEGER NOT NULL DEFAULT 0"); err != nil {
@@ -400,9 +408,13 @@ func (s *State) ListNodes() ([]NodeRow, error) {
 // raw Node.Name is preserved unchanged.
 func (s *State) UpsertNode(n *model.Node, cycle int) error {
 	norm := selector.NormName(*n)
-	_, err := s.db.Exec(
-		`INSERT INTO nodes(hash, protocol, host, port, name, source, country, norm_name, added_at, last_seen_cycle)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	nb, err := json.Marshal(n)
+	if err != nil {
+		return fmt.Errorf("upsert node: marshal: %w", err)
+	}
+	_, err = s.db.Exec(
+		`INSERT INTO nodes(hash, protocol, host, port, name, source, country, norm_name, node_json, added_at, last_seen_cycle)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(hash) DO UPDATE SET
 		   last_seen_cycle = excluded.last_seen_cycle,
 		   protocol = excluded.protocol,
@@ -410,8 +422,9 @@ func (s *State) UpsertNode(n *model.Node, cycle int) error {
 		   port = excluded.port,
 		   name = excluded.name,
 		   source = excluded.source,
-		   norm_name = excluded.norm_name`,
-		nodeHash(n), string(n.Protocol), n.Host, n.Port, n.Name, n.Source, "", norm, time.Now().Unix(), cycle,
+		   norm_name = excluded.norm_name,
+		   node_json = excluded.node_json`,
+		nodeHash(n), string(n.Protocol), n.Host, n.Port, n.Name, n.Source, "", norm, string(nb), time.Now().Unix(), cycle,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert node: %w", err)
@@ -436,9 +449,13 @@ func (s *State) UpsertNodeWithCountry(node model.Node, country string) error {
 	if err := tx.QueryRow(`SELECT value FROM meta WHERE key = 'cycle'`).Scan(&cycle); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("upsert node+country: read cycle: %w", err)
 	}
+	nb, err := json.Marshal(&node)
+	if err != nil {
+		return fmt.Errorf("upsert node+country: marshal: %w", err)
+	}
 	_, err = tx.Exec(
-		`INSERT INTO nodes(hash, protocol, host, port, name, source, country, norm_name, added_at, last_seen_cycle)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO nodes(hash, protocol, host, port, name, source, country, norm_name, node_json, added_at, last_seen_cycle)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(hash) DO UPDATE SET
 		   last_seen_cycle = excluded.last_seen_cycle,
 		   protocol = excluded.protocol,
@@ -447,8 +464,9 @@ func (s *State) UpsertNodeWithCountry(node model.Node, country string) error {
 		   name = excluded.name,
 		   source = excluded.source,
 		   country = excluded.country,
-		   norm_name = excluded.norm_name`,
-		nodeHash(&node), string(node.Protocol), node.Host, node.Port, node.Name, node.Source, country, norm, time.Now().Unix(), cycle,
+		   norm_name = excluded.norm_name,
+		   node_json = excluded.node_json`,
+		nodeHash(&node), string(node.Protocol), node.Host, node.Port, node.Name, node.Source, country, norm, string(nb), time.Now().Unix(), cycle,
 	)
 	if err != nil {
 		return fmt.Errorf("upsert node+country: %w", err)
@@ -738,20 +756,28 @@ func (s *State) deadNodeIDs(deadCycles int) ([]int64, error) {
 // for probing/replacement (the engine.Probe path needs a model.Node).
 func (s *State) NodeByHash(hash string) (model.Node, error) {
 	const q = `
-		SELECT n.hash, n.name, n.host, n.port, n.country, n.protocol, n.source
+		SELECT n.hash, n.name, n.host, n.port, n.country, n.protocol, n.source, n.node_json
 		FROM nodes n
 		WHERE n.hash = ?`
 	var (
-		h       string
-		name    string
-		host    string
-		port    int
-		country string
-		proto   string
-		source  string
+		h        string
+		name     string
+		host     string
+		port     int
+		country  string
+		proto    string
+		source   string
+		nodeJSON string
 	)
-	if err := s.db.QueryRow(q, hash).Scan(&h, &name, &host, &port, &country, &proto, &source); err != nil {
+	if err := s.db.QueryRow(q, hash).Scan(&h, &name, &host, &port, &country, &proto, &source, &nodeJSON); err != nil {
 		return model.Node{}, fmt.Errorf("node by hash: %w", err)
+	}
+	if nodeJSON != "" {
+		var n model.Node
+		if err := json.Unmarshal([]byte(nodeJSON), &n); err == nil {
+			return n, nil
+		}
+		// fall through to legacy partial reconstruction on parse error
 	}
 	return model.Node{
 		Protocol: model.Scheme(proto),
@@ -794,7 +820,7 @@ type ResultRow struct {
 func (s *State) CommonAliveSameCountry(country string, excludeCountries, excludeProtocols []string) ([]selector.Candidate, error) {
 	const q = `
 		SELECT n.hash, n.name, n.norm_name, n.host, n.port, n.country, n.protocol,
-		       COALESCE(r.latency_ms, 0)
+		       COALESCE(r.latency_ms, 0), n.node_json
 		FROM nodes n
 		LEFT JOIN (
 			SELECT node_id, alive, latency_ms,
@@ -818,30 +844,39 @@ func (s *State) CommonAliveSameCountry(country string, excludeCountries, exclude
 	var out []selector.Candidate
 	for rows.Next() {
 		var (
-			hash    string
-			name    string
-			norm    string
-			host    string
-			port    int
-			country string
-			proto   string
-			latency int
+			hash     string
+			name     string
+			norm     string
+			host     string
+			port     int
+			country  string
+			proto    string
+			latency  int
+			nodeJSON string
 		)
-		if err := rows.Scan(&hash, &name, &norm, &host, &port, &country, &proto, &latency); err != nil {
+		if err := rows.Scan(&hash, &name, &norm, &host, &port, &country, &proto, &latency, &nodeJSON); err != nil {
 			return nil, fmt.Errorf("scan common: %w", err)
 		}
 		if exC[country] || exP[proto] {
 			continue
 		}
+		node := model.Node{
+			Protocol: model.Scheme(proto),
+			Host:     host,
+			Port:     port,
+			Name:     name,
+			Country:  country,
+			User:     name,
+		}
+		if nodeJSON != "" {
+			var full model.Node
+			if err := json.Unmarshal([]byte(nodeJSON), &full); err == nil {
+				full.Country = country
+				node = full
+			}
+		}
 		out = append(out, selector.Candidate{
-			Node: model.Node{
-				Protocol: model.Scheme(proto),
-				Host:     host,
-				Port:     port,
-				Name:     name,
-				Country:  country,
-				User:     name,
-			},
+			Node:      node,
 			LatencyMs: latency,
 			Country:   country,
 		})
@@ -854,7 +889,7 @@ func (s *State) CommonAliveSameCountry(country string, excludeCountries, exclude
 // served output.
 func (s *State) SubscriptionMemberNodes() ([]model.Node, error) {
 	const q = `
-		SELECT n.hash, n.name, n.host, n.port, n.country, n.protocol, n.source
+		SELECT n.hash, n.name, n.norm_name, n.host, n.port, n.country, n.protocol, n.source, n.node_json
 		FROM subscription sub
 		JOIN nodes n ON n.hash = sub.node_id
 		ORDER BY sub.added_at`
@@ -866,18 +901,20 @@ func (s *State) SubscriptionMemberNodes() ([]model.Node, error) {
 	var out []model.Node
 	for rows.Next() {
 		var (
-			hash    string
-			name    string
-			host    string
-			port    int
-			country string
-			proto   string
-			source  string
+			hash     string
+			name     string
+			norm     string
+			host     string
+			port     int
+			country  string
+			proto    string
+			source   string
+			nodeJSON string
 		)
-		if err := rows.Scan(&hash, &name, &host, &port, &country, &proto, &source); err != nil {
+		if err := rows.Scan(&hash, &name, &norm, &host, &port, &country, &proto, &source, &nodeJSON); err != nil {
 			return nil, fmt.Errorf("scan member: %w", err)
 		}
-		out = append(out, model.Node{
+		node := model.Node{
 			Protocol: model.Scheme(proto),
 			Host:     host,
 			Port:     port,
@@ -885,7 +922,16 @@ func (s *State) SubscriptionMemberNodes() ([]model.Node, error) {
 			Country:  country,
 			Source:   source,
 			User:     name,
-		})
+		}
+		if nodeJSON != "" {
+			var full model.Node
+			if err := json.Unmarshal([]byte(nodeJSON), &full); err == nil {
+				full.Country = country
+				full.Name = norm
+				node = full
+			}
+		}
+		out = append(out, node)
 	}
 	return out, rows.Err()
 }

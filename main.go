@@ -46,6 +46,7 @@ type Config struct {
 	ExcludeProtocols []string // schemes excluded from probing/subscriptions (e.g. vmess,trojan)
 	Workers          int      // probe worker-pool size (in-process mihomo concurrency); clamped [16,512], default 350
 	ProbeTimeoutMs   int      // per-URLTest timeout (ms); 0 = engine default 2000
+	MaxPingMs        int      // drop nodes slower than this (ms) from the served subscription; 0 disables
 	SubValidityInterval time.Duration
 	SubPingInterval    time.Duration
 	SubTopN            int
@@ -95,6 +96,7 @@ func main() {
 		ExcludeProtocols: cfg.ExcludeProtocols,
 		Workers:          cfg.Workers,
 		ProbeTimeoutMs:   cfg.ProbeTimeoutMs,
+		MaxPingMs:        cfg.MaxPingMs,
 	}
 	if err := settings.Save(configPath, eff); err != nil {
 		log.Printf("config: save %s: %v", configPath, err)
@@ -177,6 +179,7 @@ func parseFlags() (Config, string) {
 	excludeProtocols := flag.String("exclude-protocols", strings.Join(loaded.ExcludeProtocols, ","), "comma-separated schemes to exclude from probing/subscriptions (e.g. vmess,trojan)")
 	workers := flag.Int("workers", dfltInt(existed, loaded.Workers, 350), "probe worker-pool size (in-process mihomo concurrency); clamped [16,512], default 350")
 	probeTimeout := flag.Int("probe-timeout", dfltInt(existed, loaded.ProbeTimeoutMs, 2000), "probe timeout per URLTest in ms (default 2000)")
+	maxPing := flag.Int("max-ping", dfltInt(existed, loaded.MaxPingMs, 0), "drop nodes slower than this (ms) from the served subscription; 0 disables")
 	// Re-register -config on the main set so flag.Parse accepts it (value already resolved).
 	flag.String("config", configPath, "persisted runtime config (config.json); CLI flags override file values")
 	flag.Parse()
@@ -226,6 +229,7 @@ func parseFlags() (Config, string) {
 		ExcludeProtocols: exclP,
 		Workers:          *workers,
 		ProbeTimeoutMs:   *probeTimeout,
+		MaxPingMs:        *maxPing,
 		SubValidityInterval: *subValidity,
 		SubPingInterval:     *subPing,
 		SubTopN:             *subTopN,
@@ -353,6 +357,7 @@ func runInner(ctx context.Context, cfg Config, sch *scheduler.Scheduler, skipUI 
 		ExcludeProtocols: cfg.ExcludeProtocols,
 		Workers:          cfg.Workers,
 		ProbeTimeoutMs:   cfg.ProbeTimeoutMs,
+		MaxPingMs:        cfg.MaxPingMs,
 		SubValidityInterval: cfg.SubValidityInterval,
 		SubPingInterval:     cfg.SubPingInterval,
 		SubTopN:             cfg.SubTopN,

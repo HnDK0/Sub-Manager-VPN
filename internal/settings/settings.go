@@ -37,6 +37,7 @@ type Settings struct {
 	ExcludeProtocols []string `json:"exclude_protocols"`
 	Workers          int      `json:"workers"`
 	ProbeTimeoutMs   int      `json:"probe_timeout_ms"`
+	MaxPingMs        int      `json:"max_ping_ms"`
 	SubValidityInterval string `json:"sub_validity_interval"` // e.g. "5m"
 	SubPingInterval    string `json:"sub_ping_interval"`      // e.g. "30m"
 	SubTopN            int    `json:"sub_topn"`               // 0 = use TopN

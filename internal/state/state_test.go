@@ -119,6 +119,42 @@ func TestUpsertNodeNormName(t *testing.T) {
 	}
 }
 
+// Regression: the full node (credentials + transport) must survive a round-trip
+// through the DB. Before node_json this was lost and User was overwritten with
+// the display name, producing non-working subscriptions.
+func TestNodeJSONPreservesCredentials(t *testing.T) {
+	s := newTestState(t)
+	n := &model.Node{
+		Protocol: model.SchemeVLESS, Host: "1.2.3.4", Port: 443,
+		Security: "tls", Network: "ws", User: "real-uuid", Flow: "xtls-rprx-vision",
+		Extra: map[string]string{"path": "/v2ray", "host": "example.com"}, Source: "src",
+	}
+	if err := s.UpsertNode(n, 1); err != nil {
+		t.Fatalf("UpsertNode: %v", err)
+	}
+
+	// node_json must be populated (the whole point of the fix).
+	var raw string
+	s.db.QueryRow(`SELECT node_json FROM nodes WHERE hash = ?`, nodeHash(n)).Scan(&raw)
+	if raw == "" {
+		t.Fatalf("node_json not persisted")
+	}
+
+	got, err := s.NodeByHash(nodeHash(n))
+	if err != nil {
+		t.Fatalf("NodeByHash: %v", err)
+	}
+	if got.User != "real-uuid" {
+		t.Fatalf("User lost: %q", got.User)
+	}
+	if got.Security != "tls" || got.Network != "ws" || got.Flow != "xtls-rprx-vision" {
+		t.Fatalf("transport lost: %+v", got)
+	}
+	if got.Extra["path"] != "/v2ray" {
+		t.Fatalf("Extra lost: %+v", got.Extra)
+	}
+}
+
 func TestPruneHistoryDays(t *testing.T) {
 	s := newTestState(t)
 	n := &model.Node{Protocol: model.SchemeTrojan, Host: "9.9.9.9", Port: 443, User: "u", Source: "src"}

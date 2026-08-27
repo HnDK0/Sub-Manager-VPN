@@ -71,6 +71,10 @@ type Config struct {
 	Workers int
 	// ProbeTimeoutMs bounds each URLTest (ms); 0 defaults to 2000 inside engine.
 	ProbeTimeoutMs int
+	// MaxPingMs drops nodes with latency above this from the subscription
+	// membership (0 = no cap). Applied at reconcile so only good-ping VPNs
+	// reach the served subscription.
+	MaxPingMs int
 
 	// SubValidityInterval drives the SubValidity timer: aliveness (latency) of
 	// each subscription member. 0 defaults to 5m.
@@ -938,6 +942,9 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 		for _, c := range selected {
 			h := nodeHash(&c.Node)
 			if s.cfg.IsBanned != nil && s.cfg.IsBanned(h) {
+				continue
+			}
+			if s.cfg.MaxPingMs > 0 && c.LatencyMs > s.cfg.MaxPingMs {
 				continue
 			}
 			selSet[h] = true
