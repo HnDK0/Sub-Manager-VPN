@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -221,7 +222,7 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleToggleSource(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
+	id, _ := url.PathUnescape(r.PathValue("id"))
 	list, err := s.reg.ListSources()
 	if err != nil {
 		writeJSONErrorLog(w, http.StatusInternalServerError, "failed to list sources", err)
@@ -246,7 +247,7 @@ func (s *Server) handleToggleSource(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
+	id, _ := url.PathUnescape(r.PathValue("id"))
 	if err := s.reg.RemoveSource(id); err != nil {
 		writeJSONErrorLog(w, http.StatusNotFound, "failed to delete source", err)
 		return
@@ -255,7 +256,7 @@ func (s *Server) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePutSource(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
+	id, _ := url.PathUnescape(r.PathValue("id"))
 	var body struct {
 		URL string `json:"url"`
 	}
@@ -519,7 +520,7 @@ func (s *Server) handleSubAdd(w http.ResponseWriter, r *http.Request) {
 // handleSubRemove removes a node (by hash) from the subscription pool and
 // regenerates out/ immediately.
 func (s *Server) handleSubRemove(w http.ResponseWriter, r *http.Request) {
-	hash := r.PathValue("hash")
+	hash, _ := url.PathUnescape(r.PathValue("hash"))
 	if hash == "" {
 		writeJSONError(w, http.StatusBadRequest, "hash required")
 		return
@@ -736,7 +737,7 @@ func (s *Server) handleUnban(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusNotFound, "ban store unavailable")
 		return
 	}
-	hash := r.PathValue("hash")
+	hash, _ := url.PathUnescape(r.PathValue("hash"))
 	if err := s.bans.Remove(hash); err != nil {
 		writeJSONErrorLog(w, http.StatusInternalServerError, "failed to unban", err)
 		return

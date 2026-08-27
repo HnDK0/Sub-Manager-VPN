@@ -160,6 +160,16 @@ func buildProxyYAML(n model.Node) map[string]any {
 		if len(alpn) > 0 {
 			base["alpn"] = alpn
 		}
+
+	case model.SchemeSS:
+		// Shadowsocks: only AEAD ciphers reach here — filter.DropUnsupported
+		// already rejected non-AEAD SS and DropMalware rejected any plugin — so
+		// cipher+password are sufficient and safe to emit. Without this case the
+		// proxy map had no "type", mihomo rejected it, the probe failed, and SS
+		// nodes were silently dropped as dead (never appeared in alive).
+		base["type"] = "ss"
+		base["cipher"] = n.Encryption
+		base["password"] = n.User
 	}
 	return base
 }

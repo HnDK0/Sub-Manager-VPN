@@ -559,6 +559,16 @@ func (s *Scheduler) ProbeNodes(ctx context.Context, nodes []model.Node) (map[str
 	return s.ProbeFn(ctx, nodes)
 }
 
+// SyncNodes loads the given nodes into the embedded probe engine so they can be
+// probed. Exposed for the web manual-test path (handleTestNodes), which probes
+// arbitrary DB nodes that may not be in the engine's last cycle sync.
+func (s *Scheduler) SyncNodes(nodes []model.Node) error {
+	if s.engine == nil {
+		return nil
+	}
+	return s.engine.SyncNodes(nodes)
+}
+
 // Run executes one Cycle immediately, then repeats on three independent timers
 // until ctx is cancelled: CommonScan (Interval), SubValidity (SubValidityInterval),
 // and SubPing (SubPingInterval). It always calls Stop on the way out.

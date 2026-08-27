@@ -58,3 +58,30 @@ func TestBuildProxyYAMLTransports(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildProxyYAMLSS ensures Shadowsocks nodes get a real clash-meta "ss"
+// proxy (type+cipher+password). Without this case buildProxyYAML returned a map
+// with no "type", mihomo rejected it, the probe failed, and SS nodes were
+// silently dropped as dead.
+func TestBuildProxyYAMLSS(t *testing.T) {
+	n := model.Node{
+		Protocol:   model.SchemeSS,
+		Host:       "5.6.7.8",
+		Port:       8388,
+		User:       "secret-password",
+		Encryption: "aes-256-gcm",
+	}
+	y := buildProxyYAML(n)
+	if y["type"] != "ss" {
+		t.Fatalf("SS type = %v, want \"ss\"", y["type"])
+	}
+	if y["cipher"] != "aes-256-gcm" {
+		t.Fatalf("SS cipher = %v, want \"aes-256-gcm\"", y["cipher"])
+	}
+	if y["password"] != "secret-password" {
+		t.Fatalf("SS password = %v, want \"secret-password\"", y["password"])
+	}
+	if y["server"] != "5.6.7.8" || y["port"] != 8388 {
+		t.Fatalf("SS server/port = %v:%v, want 5.6.7.8:8388", y["server"], y["port"])
+	}
+}

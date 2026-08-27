@@ -20,37 +20,29 @@ func (s *Server) handleTestNodes(w http.ResponseWriter, r *http.Request) {
 		writeJSONErrorLog(w, http.StatusBadRequest, "bad request", err)
 		return
 	}
+	// Resolve the requested nodes directly from the DB (not the scheduler's
+	// in-memory parse cache, which only holds the most recent cycle's parse and
+	// would miss any node the user can see in the UI). This makes manual ping /
+	// speed-test work for every node regardless of cache state.
 	pool := strings.TrimSpace(r.URL.Query().Get("pool"))
-	var cached []model.Node
+	hashToNode := make(map[string]model.Node)
 	if pool == "subscription" {
-		// Intersect the in-memory cached nodes (which carry the real User field
-		// the hash is computed from) with the subscription set, keyed by the
-		// stored node_id hash from ListSubscription.
 		subs, e := s.st.ListSubscription()
 		if e != nil {
 			writeJSONErrorLog(w, http.StatusInternalServerError, "subscription list", e)
 			return
 		}
-		set := make(map[string]struct{}, len(subs))
 		for _, r := range subs {
-			set[r.NodeID] = struct{}{}
-		}
-		all := s.sch.CachedNodes()
-		for _, n := range all {
-			if _, ok := set[hashNode(n)]; ok {
-				cached = append(cached, n)
+			if n, err := s.st.NodeByHash(r.NodeID); err == nil {
+				hashToNode[hashNode(n)] = n
 			}
 		}
 	} else {
-		cached = s.sch.CachedNodes()
-	}
-	if len(cached) == 0 {
-		writeJSONError(w, http.StatusConflict, "run a cycle first")
-		return
-	}
-	hashToNode := make(map[string]model.Node, len(cached))
-	for _, n := range cached {
-		hashToNode[hashNode(n)] = n
+		for _, id := range req.IDs {
+			if n, err := s.st.NodeByHash(id); err == nil {
+				hashToNode[hashNode(n)] = n
+			}
+		}
 	}
 	views, err := s.nodeViews()
 	if err != nil {
@@ -62,13 +54,20 @@ func (s *Server) handleTestNodes(w http.ResponseWriter, r *http.Request) {
 		viewByHash[v.Hash] = v
 	}
 	var selected []model.Node
-	for _, id := range req.IDs {
-		if n, ok := hashToNode[id]; ok {
+	if pool == "subscription" {
+		// No explicit selection => test the whole subscription.
+		for _, n := range hashToNode {
 			selected = append(selected, n)
+		}
+	} else {
+		for _, id := range req.IDs {
+			if n, ok := hashToNode[id]; ok {
+				selected = append(selected, n)
+			}
 		}
 	}
 	if len(selected) == 0 {
-		writeJSONError(w, http.StatusBadRequest, "no matching cached nodes for given ids")
+		writeJSONError(w, http.StatusBadRequest, "no matching nodes for given ids")
 		return
 	}
 	// Confused-deputy / DNS-rebinding guard: validate the host resolves to a
@@ -97,6 +96,11 @@ func (s *Server) handleTestNodes(w http.ResponseWriter, r *http.Request) {
 	if len(kept) == 0 {
 		writeJSONError(w, http.StatusBadRequest, "all selected nodes have non-public hosts; probing internal addresses is not allowed")
 		return
+	}
+	// The embedded engine only probes nodes it knows about; the scheduler syncs
+	// before each cycle, so sync the manually-selected nodes here too.
+	if err := s.sch.SyncNodes(kept); err != nil {
+		log.Printf("web: handleTestNodes sync: %v", err)
 	}
 	results, err := s.sch.ProbeNodes(s.sch.WithSpeed(r.Context()), kept)
 	if err != nil {

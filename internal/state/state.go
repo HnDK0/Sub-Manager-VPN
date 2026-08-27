@@ -145,6 +145,13 @@ var migrations = []string{
 		ping_latency_ms INTEGER NOT NULL DEFAULT 0,
 		ping_checked_at INTEGER NOT NULL DEFAULT 0
 	)`,
+	// LatestResult and deadNodeIDs (Prune) both probe results.node_id with
+	// per-node queries across the whole candidate set every cycle. Without these
+	// indexes Postgres-free SQLite does a full table scan of results (which grows
+	// to HistoryCycles * node_count rows, millions) for every one of ~16k calls —
+	// that is the multi-minute end-of-cycle hang. Add them once, idempotently.
+	`CREATE INDEX IF NOT EXISTS idx_results_node ON results(node_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_history_node ON history(node_id)`,
 }
 
 // Open opens (creating if needed) the SQLite database at path and runs
