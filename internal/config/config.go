@@ -181,6 +181,28 @@ func (r *Registry) write(sources []Source) error {
 	return nil
 }
 
+// normalizeSourceURL returns a canonical form of a source URL used ONLY for
+// duplicate detection. It does NOT alter the stored URL (which must stay in the
+// exact form the fetcher expects). We lowercase scheme/host, drop the fragment
+// and trailing slash, and for github.com reduce the path to /owner/repo so that
+// /tree, /blob and other sub-paths of the same repository collapse to one source.
+func normalizeSourceURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	host := strings.ToLower(u.Host)
+	path := strings.TrimRight(u.Path, "/")
+	if host == "github.com" || host == "www.github.com" {
+		// keep only /owner/repo so a bare repo and its /tree,/blob paths dedupe
+		seg := strings.Split(strings.Trim(path, "/"), "/")
+		if len(seg) >= 2 && seg[0] != "" && seg[1] != "" {
+			path = "/" + seg[0] + "/" + seg[1]
+		}
+	}
+	return "https://" + host + path
+}
+
 // AddSource validates the URL (must be a parseable https:// URL), appends it
 // enabled by default, and returns the created Source. Non-https URLs and
 // duplicates are rejected and never persisted.
@@ -202,8 +224,9 @@ func (r *Registry) AddSource(rawURL string) (*Source, error) {
 	if err != nil {
 		return nil, err
 	}
+	norm := normalizeSourceURL(rawURL)
 	for _, s := range existing {
-		if s.URL == rawURL {
+		if normalizeSourceURL(s.URL) == norm {
 			return nil, fmt.Errorf("config: source %q already exists", rawURL)
 		}
 	}
