@@ -139,7 +139,13 @@ func DropInsecure(nodes []model.Node) []model.Node {
 			if n.Security == "reality" && strings.TrimSpace(n.Extra["pbk"]) == "" {
 				drop = true
 			}
-		case model.SchemeVMess, model.SchemeTrojan:
+			// VLESS flow (xtls-rprx-vision / xtls-rprx-origin) requires reality
+			// security. A flow set with plain tls (or none) is invalid and the
+			// client fails the handshake -> drop before it can reach a probe.
+			if n.Flow != "" && n.Security != "reality" {
+				drop = true
+			}
+	case model.SchemeVMess, model.SchemeTrojan:
 			// These are plaintext-capable without TLS transport.
 			if n.Security != "tls" {
 				drop = true

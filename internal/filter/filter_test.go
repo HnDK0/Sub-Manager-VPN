@@ -77,6 +77,8 @@ func TestDropInsecure(t *testing.T) {
 	// VLESS security=reality WITHOUT a public key -> DROPPED (invalid reality; the
 	// probe would disable reality and fall back to plain TLS, falsely passing).
 	vlessRealityNoPbk := model.Node{Protocol: model.SchemeVLESS, Host: "h", Port: 1, User: "u", Security: "reality"}
+	// VLESS with flow set but security=tls (not reality) -> DROPPED (flow requires reality).
+	vlessFlowNoReality := model.Node{Protocol: model.SchemeVLESS, Host: "h", Port: 1, User: "u", Security: "tls", Flow: "xtls-rprx-vision"}
 	// VLESS encryption=none + security=tls -> KEPT (encryption=none is normal VLESS default).
 	vlessEncNoneTLS := model.Node{Protocol: model.SchemeVLESS, Host: "h", Port: 1, User: "u", Security: "tls", Encryption: "none"}
 	// VMess without TLS -> dropped.
@@ -101,13 +103,13 @@ func TestDropInsecure(t *testing.T) {
 	// DropUnsupported and never reach DropInsecure; AEAD SS is kept. They are
 	// covered by TestDropUnsupported.
 	got := DropInsecure([]model.Node{
-		vlessNone, vlessTLS, vlessReality, vlessRealityNoPbk, vlessEncNoneTLS, vmessNoTLS, vmessTLS,
+		vlessNone, vlessTLS, vlessReality, vlessRealityNoPbk, vlessFlowNoReality, vlessEncNoneTLS, vmessNoTLS, vmessTLS,
 		trojanNoTLS, trojanTLS, hy2, tuic, socks, certSkip,
 	})
 
 	// Assert exact survivors by checking each expected outcome.
 	wantKept := []model.Node{vlessTLS, vlessReality, vlessEncNoneTLS, vmessTLS, trojanTLS, tuic}
-	wantDropped := []model.Node{vlessNone, vlessRealityNoPbk, vmessNoTLS, trojanNoTLS, hy2, socks, certSkip}
+	wantDropped := []model.Node{vlessNone, vlessRealityNoPbk, vlessFlowNoReality, vmessNoTLS, trojanNoTLS, hy2, socks, certSkip}
 
 	for _, n := range wantKept {
 		if !containsNode(got, n) {
@@ -294,7 +296,7 @@ func containsNode(nodes []model.Node, n model.Node) bool {
 	for _, m := range nodes {
 		if m.Protocol == n.Protocol && m.Host == n.Host && m.Port == n.Port &&
 			m.User == n.User && m.Security == n.Security && m.Encryption == n.Encryption &&
-			m.Plugin == n.Plugin && extraEqual(m.Extra, n.Extra) {
+			m.Flow == n.Flow && m.Plugin == n.Plugin && extraEqual(m.Extra, n.Extra) {
 			return true
 		}
 	}
