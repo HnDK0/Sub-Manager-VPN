@@ -94,8 +94,9 @@ func TestDropInsecure(t *testing.T) {
 	certSkip := model.Node{Protocol: model.SchemeVMess, Host: "h", Port: 1, User: "u", Security: "tls",
 		Extra: map[string]string{"skip-cert-verify": "true"}}
 
-	// SS/WireGuard nodes are removed upstream by DropUnsupported and never reach
-	// DropInsecure; they are covered by TestDropUnsupported instead.
+	// SS nodes with a non-AEAD cipher and WireGuard nodes are removed upstream by
+	// DropUnsupported and never reach DropInsecure; AEAD SS is kept. They are
+	// covered by TestDropUnsupported.
 	got := DropInsecure([]model.Node{
 		vlessNone, vlessTLS, vlessReality, vlessEncNoneTLS, vmessNoTLS, vmessTLS,
 		trojanNoTLS, trojanTLS, hy2, tuic, socks, certSkip,
@@ -183,8 +184,10 @@ func TestDropBroken(t *testing.T) {
 }
 
 func TestDropUnsupported(t *testing.T) {
-	// Shadowsocks -> dropped (DPI-fingerprintable; obfs lives on SS).
-	ss := model.Node{Protocol: model.SchemeSS, Host: "h", Port: 1, User: "u", Encryption: "aes-256-gcm"}
+	// AEAD Shadowsocks -> KEPT (re-enabled, safe cipher).
+	ssAEAD := model.Node{Protocol: model.SchemeSS, Host: "h", Port: 1, User: "u", Encryption: "aes-256-gcm"}
+	// Non-AEAD Shadowsocks -> dropped (weak/fingerprintable cipher).
+	ssWeak := model.Node{Protocol: model.SchemeSS, Host: "h", Port: 1, User: "u", Encryption: "rc4-md5"}
 	// WireGuard -> dropped (handshake trivially recognizable).
 	wg := model.Node{Protocol: model.SchemeWireGuard, Host: "h", Port: 1, User: "u"}
 	// Kept schemes survive.
@@ -194,18 +197,21 @@ func TestDropUnsupported(t *testing.T) {
 	hy2 := model.Node{Protocol: model.SchemeHysteria2, Host: "h", Port: 1, User: "u"}
 	tuic := model.Node{Protocol: model.SchemeTUIC, Host: "h", Port: 1, User: "u"}
 
-	got := DropUnsupported([]model.Node{ss, wg, vless, vmess, trojan, hy2, tuic})
+	got := DropUnsupported([]model.Node{ssAEAD, ssWeak, wg, vless, vmess, trojan, hy2, tuic})
 
-	if containsNode(got, ss) || containsNode(got, wg) {
-		t.Error("SS and WireGuard must be dropped by DropUnsupported")
+	if containsNode(got, ssWeak) || containsNode(got, wg) {
+		t.Error("non-AEAD SS and WireGuard must be dropped by DropUnsupported")
+	}
+	if !containsNode(got, ssAEAD) {
+		t.Error("AEAD SS must be kept by DropUnsupported")
 	}
 	for _, n := range []model.Node{vless, vmess, trojan, hy2, tuic} {
 		if !containsNode(got, n) {
 			t.Errorf("expected kept: %+v", n)
 		}
 	}
-	if len(got) != 5 {
-		t.Fatalf("expected 5 survivors, got %d: %+v", len(got), got)
+	if len(got) != 6 {
+		t.Fatalf("expected 6 survivors, got %d: %+v", len(got), got)
 	}
 }
 
@@ -225,7 +231,7 @@ func TestDropMalware(t *testing.T) {
 	// ssconf with exec payload -> dropped.
 	ssconfExec := model.Node{Protocol: model.SchemeVLESS, Host: "h", Port: 1, User: "u", Security: "tls",
 		Extra: map[string]string{"ssconf": "ssconf://example.com/x.sh; exec /bin/sh"}}
-	// benign Plugin (obfs) -> KEPT (Plugin not in scope).
+	// SS plugin (obfs) -> DROPPED (injection surface; only bare AEAD SS kept).
 	pluginNode := model.Node{Protocol: model.SchemeSS, Host: "h", Port: 1, User: "u", Encryption: "aes-256-gcm",
 		Plugin: "obfs-local;obfs=http"}
 	// VLESS ws path with query separators (&) -> KEPT (benign param, not a payload).
@@ -247,8 +253,8 @@ func TestDropMalware(t *testing.T) {
 	got := DropMalware([]model.Node{execNode, hijack, benign, ssconfLink, ssconfExec, pluginNode,
 		vlessPath, hy2Obfs, execValue, substValue, scriptValue})
 
-	wantKept := []model.Node{benign, ssconfLink, pluginNode, vlessPath, hy2Obfs}
-	wantDropped := []model.Node{execNode, hijack, ssconfExec, execValue, substValue, scriptValue}
+	wantKept := []model.Node{benign, ssconfLink, vlessPath, hy2Obfs}
+	wantDropped := []model.Node{execNode, hijack, ssconfExec, pluginNode, execValue, substValue, scriptValue}
 
 	for _, n := range wantKept {
 		if !containsNode(got, n) {

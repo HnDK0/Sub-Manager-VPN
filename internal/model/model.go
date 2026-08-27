@@ -60,7 +60,7 @@ type Node struct {
 	Network    string            // transport type, e.g. "tcp"/"ws"/"grpc"/"mkcp"/"xhttp"
 	User       string            // uuid / username / password
 	Extra      map[string]string // non-mapped fields; DROPPED at generation (security)
-	Plugin     string            // SS obfs plugin (benign, validated at parse), e.g. "obfs-local;obfs=http"
+	Plugin     string            // SS plugin; rejected by DropMalware (injection surface) — only bare AEAD SS kept
 	Name       string            // human-friendly node name
 	Raw        string            // original URI (quarantined, never emitted)
 	Source     string            // source URL/id the node came from

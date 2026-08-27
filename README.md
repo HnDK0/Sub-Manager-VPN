@@ -374,9 +374,12 @@ location /myverylongwebsecret12+12/ {
 
 ## Безопасность
 
-- **Белый список протоколов**: только Trojan, VLESS (`tls`/`reality`), VMess
-  (`tls`), Hysteria2, TUIC. Shadowsocks, WireGuard, obfs-SS и прочее отбрасываются
-  фильтром `DropUnsupported` на этапе парсинга/фильтрации.
+- **Белый список протоколов**: Trojan, VLESS (`tls`/`reality`), VMess (`tls`),
+  Hysteria2, TUIC, и Shadowsocks — **только AEAD-шифры** (`aes-256-gcm`,
+  `aes-128-gcm`, `chacha20-ietf-poly1305`, `xchacha20-ietf-poly1305`,
+  `2022-blake3-aes-256-gcm`, `2022-blake3-aes-128-gcm`, `2022-blake3-chacha20-poly1305`).
+  Не-AEAD Shadowsocks (cfb/rc4/none/…) и WireGuard отбрасываются фильтром
+  `DropUnsupported`; любой SS-плагин (obfs/v2ray-plugin) отбрасывается `DropMalware`.
 - **Только HTTPS-источники**: не-https ссылки отклоняются и никогда не сохраняются.
 - **Генераторы** строят выходные структуры/URI строго из известных полей узла —
   опасный ключ не может «протечь» в твою подписку.

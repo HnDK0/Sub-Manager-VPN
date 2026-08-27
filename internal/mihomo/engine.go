@@ -59,7 +59,9 @@ func New(opts Options) *Controller {
 		opts.ProbeTimeoutMs = 2000
 	}
 	if opts.ProbeURL == "" {
-		opts.ProbeURL = "https://www.gstatic.com/generate_204"
+		// Contentful target (not a bare 204) so a fake/MITM node that
+		// synthesizes an empty 204 locally fails the probe.
+		opts.ProbeURL = "https://cp.cloudflare.com/"
 	}
 	if opts.SpeedTestURL == "" {
 		opts.SpeedTestURL = "http://speedtest.selectel.ru/10MB"

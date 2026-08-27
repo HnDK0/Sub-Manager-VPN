@@ -184,12 +184,20 @@ var malwareKeys = map[string]struct{}{
 func DropMalware(nodes []model.Node) []model.Node {
 	out := make([]model.Node, 0, len(nodes))
 	for _, n := range nodes {
-		if isMalwareExtra(n.Extra) {
+		if isMalwareExtra(n.Extra) || isMalwarePlugin(n.Plugin) {
 			continue
 		}
 		out = append(out, n)
 	}
 	return out
+}
+
+// isMalwarePlugin inspects the SS plugin string. Any non-empty plugin is
+// rejected: simple-obfs is DPI-bypassable/deprecated and v2ray-plugin can
+// tunnel arbitrary traffic (an injection surface). Only bare AEAD SS (no
+// plugin) is accepted.
+func isMalwarePlugin(plugin string) bool {
+	return strings.TrimSpace(plugin) != ""
 }
 
 // isMalwareExtra inspects only the Extra map for malware indicators.
@@ -289,16 +297,41 @@ func DropBroken(nodes []model.Node) []model.Node {
 	return out
 }
 
-// DropUnsupported removes nodes whose protocol is outside the strict
-// allowlist. Shadowsocks (SchemeSS) is DPI-fingerprintable, simple-obfs (which
-// lives on SS) is deprecated/bypassable, and the WireGuard (SchemeWireGuard)
-// handshake is trivially recognizable — all three are cut. Kept:
-// vmess/vless/trojan/hysteria2/tuic.
+// safeSSCiphers is the allowlist of Shadowsocks ciphers we re-enable. Only AEAD
+// methods are accepted; stream/non-AEAD ciphers (cfb/ctr/rc4/chacha20 non-ietf/
+// salsa20/tea/speck/plain/none) and the non-recommended aes-192-gcm are rejected
+// because they are weak or fingerprintable. 2022-blake3-* are the current SIP022
+// standard and safe.
+var safeSSCiphers = map[string]bool{
+	"aes-256-gcm":                    true,
+	"aes-128-gcm":                    true,
+	"chacha20-ietf-poly1305":         true,
+	"xchacha20-ietf-poly1305":        true,
+	"2022-blake3-aes-256-gcm":        true,
+	"2022-blake3-aes-128-gcm":        true,
+	"2022-blake3-chacha20-poly1305":  true,
+}
+
+// isSafeSS reports whether an SS cipher is an accepted AEAD method.
+func isSafeSS(cipher string) bool {
+	return safeSSCiphers[strings.ToLower(strings.TrimSpace(cipher))]
+}
+
+// DropUnsupported removes nodes whose protocol is outside the strict allowlist.
+// WireGuard (SchemeWireGuard) is still cut — its handshake is trivially
+// recognizable. Shadowsocks (SchemeSS) is RE-ENABLED but only for AEAD ciphers
+// (see isSafeSS); non-AEAD SS is dropped because it is weak/fingerprintable.
+// Kept: vmess/vless/trojan/hysteria2/tuic + AEAD SS.
 func DropUnsupported(nodes []model.Node) []model.Node {
 	out := make([]model.Node, 0, len(nodes))
 	for _, n := range nodes {
-		if n.Protocol == model.SchemeSS || n.Protocol == model.SchemeWireGuard {
+		switch n.Protocol {
+		case model.SchemeWireGuard:
 			continue
+		case model.SchemeSS:
+			if !isSafeSS(n.Encryption) {
+				continue
+			}
 		}
 		out = append(out, n)
 	}
