@@ -11,7 +11,6 @@ import (
 
 	"vpn-sub-manager/internal/config"
 	"vpn-sub-manager/internal/select"
-	"vpn-sub-manager/internal/state"
 )
 
 // NodeView is a display/testable node enriched with the hash and port that
@@ -661,23 +660,33 @@ func (s *Server) countNodes() (int, error) {
 	return n, nil
 }
 
-// handleCleanup runs the retention prune immediately (plus orphan removal) so a
-// bloated DB shrinks on demand. It is idempotent and Bearer-protected.
+// handleCleanup wipes all node + measurement tables so the DB is rebuilt from
+// sources on the next cycle. It is Bearer-protected.
 func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 	before, err := s.countNodes()
 	if err != nil {
 		writeJSONErrorLog(w, http.StatusInternalServerError, "cleanup failed", err)
 		return
 	}
-	cycle := s.sch.Status().Cycle
-	rt := state.DefaultRetention()
-	rt.DeadCycles = s.sch.DeadCycles()
-	if err := s.st.Prune(rt, cycle); err != nil {
-		log.Printf("web: cleanup prune: %v", err)
+	// Full reset: selective retention keeps weeks of history and removes almost
+	// nothing in daily use, which is not what "clear the DB" should mean. Wipe
+	// children first (results/history/subscription) then nodes, in one tx.
+	tables := []string{"results", "history", "subscription", "nodes"}
+	tx, terr := s.st.DB().Begin()
+	if terr != nil {
+		writeJSONErrorLog(w, http.StatusInternalServerError, "cleanup failed", terr)
+		return
 	}
-	orphans, err := s.st.DeleteOrphanNodes()
-	if err != nil {
-		log.Printf("web: cleanup orphans: %v", err)
+	for _, t := range tables {
+		if _, e := tx.Exec("DELETE FROM " + t); e != nil {
+			_ = tx.Rollback()
+			writeJSONErrorLog(w, http.StatusInternalServerError, "cleanup failed", e)
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		writeJSONErrorLog(w, http.StatusInternalServerError, "cleanup failed", err)
+		return
 	}
 	after, err := s.countNodes()
 	if err != nil {
@@ -688,7 +697,7 @@ func (s *Server) handleCleanup(w http.ResponseWriter, r *http.Request) {
 		"nodesBefore": before,
 		"nodesAfter":  after,
 		"removed":     before - after,
-		"orphans":     orphans,
+		"orphans":     0,
 	})
 }
 
