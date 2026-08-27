@@ -280,6 +280,30 @@ func parseVMess(uri string) *model.Node {
 		n.Security = "tls"
 	}
 	n.Network = v.Net
+	// ponytail: capture ws/grpc/xhttp transport params into Extra so mihomo's
+	// applyTransport can build ws-opts/grpc-opts. vmess:// JSON stores them in
+	// host/path/type, but parseVMess never copied them — so vmess+ws probed with
+	// an empty config and always returned dead. grpc encodes the service name in
+	// `path`.
+	if net := strings.ToLower(v.Net); net != "" && net != "tcp" {
+		ex := map[string]string{}
+		if v.Host != "" {
+			ex["host"] = v.Host
+		}
+		if v.Path != "" {
+			ex["path"] = v.Path
+		}
+		if v.Type != "" {
+			ex["type"] = v.Type
+		}
+		if v.SNI != "" {
+			ex["sni"] = v.SNI
+		}
+		if net == "grpc" && v.Path != "" {
+			ex["serviceName"] = v.Path
+		}
+		n.Extra = ex
+	}
 	return n
 }
 

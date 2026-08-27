@@ -739,6 +739,12 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 	s.curCycle = cycle
 
 	var nodes []model.Node
+	// ponytail: free aggregators cross-post the same nodes, so a node's hash can
+	// appear once per source. Dedup here (not only in the DB upsert) so the probe
+	// set, the AliveCount counter, and the persisted pool are all UNIQUE — without
+	// this, AliveCount double-counts shared nodes while the subscription stays
+	// correct, making the two numbers diverge ~2x.
+	seen := make(map[string]bool)
 	for _, src := range sources {
 		fetched, err := s.FetchFn(cctx, src)
 		if err != nil {
@@ -747,7 +753,14 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 			s.setStatus(func(st *Snapshot) { st.SourceDone++ })
 			continue
 		}
-		nodes = append(nodes, fetched...)
+		for _, n := range fetched {
+			h := nodeHash(&n)
+			if seen[h] {
+				continue
+			}
+			seen[h] = true
+			nodes = append(nodes, n)
+		}
 		s.setStatus(func(st *Snapshot) {
 			st.SourceDone++
 			st.NodesFetched += len(fetched)
