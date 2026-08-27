@@ -40,10 +40,16 @@ type Config struct {
 	AssetsDir   string
 	OutDir      string
 
-	Interval  time.Duration
-	TopN      int
-	DegradeMs int
-	MinKeep   int
+	Interval time.Duration
+	// ReProbeCycles is the dead-node probe-skip window (in cycles). A node whose
+	// latest result is dead is skipped until at least this many cycles have
+	// passed since that result, then re-probed. 0 disables the skip (probe all
+	// every cycle). Unlike the old one-way corpse filter, dead nodes are always
+	// re-probed on this rotation — never dropped permanently.
+	ReProbeCycles int
+	TopN          int
+	DegradeMs     int
+	MinKeep       int
 	// ProbeURL is fetched (HTTP GET) through the proxy egress to measure real
 	// RTT. Empty uses the engine default (gstatic generate_204).
 	ProbeURL string
@@ -232,6 +238,9 @@ type Scheduler struct {
 func New(cfg Config) (*Scheduler, error) {
 	if cfg.Interval <= 0 {
 		cfg.Interval = 2 * time.Hour
+	}
+	if cfg.ReProbeCycles < 0 {
+		cfg.ReProbeCycles = 0
 	}
 	if cfg.TopN <= 0 {
 		cfg.TopN = 5
@@ -821,6 +830,17 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 	for _, n := range nodes {
 		if exclude[strings.ToUpper(n.Country)] || skipProto[strings.ToLower(string(n.Protocol))] {
 			continue
+		}
+		// Dead-node probe-skip (variant B circuit breaker): a node whose latest
+		// result is dead is skipped for ReProbeCycles cycles, then re-probed on
+		// a slow rotation. Never permanent — unlike the old one-way corpse filter.
+		if s.cfg.ReProbeCycles > 0 {
+			if id, e := s.st.NodeID(nodeHash(&n)); e == nil {
+				if lr, e2 := s.st.LatestResult(id); e2 == nil && !lr.Alive &&
+					cycle >= lr.CycleID && cycle-lr.CycleID < s.cfg.ReProbeCycles {
+					continue
+				}
+			}
 		}
 		probeNodes = append(probeNodes, n)
 	}

@@ -64,6 +64,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 	if out.StatePath != in.StatePath || out.WebAddr != in.WebAddr || out.WebToken != in.WebToken ||
 		out.WebSecret != in.WebSecret || out.Interval != in.Interval || out.TopN != in.TopN ||
+		out.ReProbeCycles != in.ReProbeCycles ||
 		len(out.ExcludeCountries) != len(in.ExcludeCountries) {
 		t.Fatalf("round-trip mismatch: %+v vs %+v", in, out)
 	}
