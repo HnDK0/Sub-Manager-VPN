@@ -532,6 +532,76 @@ func (s *State) AddHistory(nodeID int64, latencyMs int, cycle int) error {
 	return nil
 }
 
+// BatchResult carries one probe outcome for batched persistence.
+type BatchResult struct {
+	Hash      string
+	Alive     bool
+	LatencyMs int
+	SpeedKbps int
+}
+
+// RecordResultsBatch persists a full probe fan-out. To avoid holding the SQLite
+// write lock for one giant transaction (which would starve SubValidity), rows are
+// committed in chunks; each chunk is its own short transaction so other writers
+// can interleave between them. The previous per-worker design serialized 492
+// goroutines on the write lock, collapsing probe concurrency and causing
+// SQLITE_BUSY.
+func (s *State) RecordResultsBatch(rows []BatchResult, cycle int) error {
+	const chunk = 2000
+	for start := 0; start < len(rows); start += chunk {
+		end := start + chunk
+		if end > len(rows) {
+			end = len(rows)
+		}
+		if err := s.recordChunk(rows[start:end], cycle); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *State) recordChunk(rows []BatchResult, cycle int) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin batch: %w", err)
+	}
+	now := time.Now().Unix()
+	for _, r := range rows {
+		id, e := s.NodeID(r.Hash)
+		if e != nil {
+			continue
+		}
+		if _, e := tx.Exec(
+			`INSERT INTO results(node_id, alive, latency_ms, speed_kbps, checked_at, cycle_id) VALUES(?, ?, ?, ?, ?, ?)`,
+			id, boolToInt(r.Alive), r.LatencyMs, r.SpeedKbps, now, cycle,
+		); e != nil {
+			tx.Rollback()
+			return fmt.Errorf("batch result: %w", e)
+		}
+		if _, e := tx.Exec(
+			`UPDATE nodes SET speed_kbps = ? WHERE id = ?`,
+			r.SpeedKbps, id,
+		); e != nil {
+			tx.Rollback()
+			return fmt.Errorf("batch speed: %w", e)
+		}
+		if _, e := tx.Exec(
+			`INSERT INTO history(node_id, latency_ms, checked_at, cycle_id) VALUES(?, ?, ?, ?)`,
+			id, r.LatencyMs, now, cycle,
+		); e != nil {
+			tx.Rollback()
+			return fmt.Errorf("batch history: %w", e)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit batch: %w", err)
+	}
+	return nil
+}
+
 // IncrementCycle reads the monotonic cycle counter from meta, increments it,
 // persists it, and returns the new value (starting at 1 on a fresh DB).
 func (s *State) IncrementCycle() (int, error) {

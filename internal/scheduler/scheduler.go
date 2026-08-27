@@ -503,13 +503,6 @@ func (s *Scheduler) defaultProbe(ctx context.Context, nodes []model.Node) (map[s
 			}
 			mu.Lock()
 			out[nodeHash(&n)] = r
-			// ponytail: live pool update — persist each result as it finishes so
-			// the Nodes table (nodeViews joins the latest results row) refreshes
-			// row-by-row during the probe instead of only at cycle end.
-			if id, derr := s.st.NodeID(nodeHash(&n)); derr == nil {
-				_ = s.st.RecordResult(id, r.Alive, int(r.LatencyMs), int(r.SpeedKbps), s.curCycle)
-				_ = s.st.AddHistory(id, int(r.LatencyMs), s.curCycle)
-			}
 			mu.Unlock()
 			s.setStatus(func(st *Snapshot) {
 				st.ProbeDone++ // ponytail: live probe progress for the UI
@@ -522,6 +515,23 @@ func (s *Scheduler) defaultProbe(ctx context.Context, nodes []model.Node) (map[s
 		}(n)
 	}
 	wg.Wait()
+	// ponytail: persist the whole fan-out in ONE transaction after the probes
+	// finish. Writing per-result inside the worker loop serialized 492 goroutines
+	// on the SQLite write lock — collapsing probe concurrency (speed drop) and
+	// starving SubValidity (SQLITE_BUSY). The Nodes table refreshes on the next
+	// nodeViews query instead of row-by-row.
+	batch := make([]state.BatchResult, 0, len(out))
+	for h, r := range out {
+		batch = append(batch, state.BatchResult{
+			Hash:      h,
+			Alive:     r.Alive,
+			LatencyMs: int(r.LatencyMs),
+			SpeedKbps: int(r.SpeedKbps),
+		})
+	}
+	if err := s.st.RecordResultsBatch(batch, s.curCycle); err != nil {
+		log.Printf("scheduler: persist probe results: %v", err)
+	}
 	return out, nil
 }
 
@@ -879,9 +889,10 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 		}
 	}
 
-	// ponytail: probe results are now persisted live inside defaultProbe, as
-	// each node finishes probing (not batched at cycle end). The 'results' and
-	// 'history' rows feed nodeViews(), so the Nodes pool refreshes row-by-row.
+	// ponytail: probe results are persisted in a single batched transaction at
+	// the end of defaultProbe (see RecordResultsBatch), so the worker pool is
+	// never serialized on the SQLite write lock. nodeViews() refreshes on its
+	// next query.
 
 	// ponytail: if the cycle was stopped mid-probe, keep the already-collected
 	// results (recorded above) but DO NOT run selection/reconcile/regenerate —

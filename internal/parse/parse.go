@@ -358,8 +358,15 @@ func parseTrojan(uri, userinfo, hostport, query, fragment string) *model.Node {
 	if n.Security == "" {
 		n.Security = "tls"
 	}
-	n.Network = "tcp"
-	n.Extra = pickExtra(q, "sni", "type", "host", "path", "alpn", "authority", "mode", "allow_insecure", "congestion_control")
+	// ponytail: capture the transport (ws/grpc/xhttp/h2) from the URI instead of
+	// hardcoding tcp — trojan supports ws/grpc transports, and parsing them as tcp
+	// (like the old vmess bug) made trojan+ws/grpc probe with an empty config and
+	// always return dead.
+	n.Network = q.Get("network")
+	if n.Network == "" {
+		n.Network = "tcp"
+	}
+	n.Extra = pickExtra(q, "type", "host", "path", "sni", "serviceName", "mode", "alpn", "authority", "allow_insecure", "congestion_control")
 	return n
 }
 
