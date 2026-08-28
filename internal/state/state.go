@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
+	"strings"
 	"time"
 
 	"vpn-sub-manager/internal/model"
@@ -46,6 +48,27 @@ type NodeRow struct {
 	LatencyMs     int
 	SpeedKbps     int
 	LastSeenCycle int
+	Data          string // full model.Node JSON (node_json column)
+}
+
+// Node reconstructs the full model.Node from the persisted node_json (Data).
+// On empty/missing data or a parse error it falls back to a partial node built
+// from the denormalized row columns so callers still get a usable probe target.
+func (r NodeRow) Node() model.Node {
+	if r.Data != "" {
+		var n model.Node
+		if err := json.Unmarshal([]byte(r.Data), &n); err == nil {
+			return n
+		}
+	}
+	return model.Node{
+		Protocol: model.Scheme(r.Protocol),
+		Host:     r.Host,
+		Port:     r.Port,
+		Name:     r.Name,
+		Country:  r.Country,
+		User:     r.Name,
+	}
 }
 
 // Retention controls how aggressively the database is pruned so it grows only
@@ -420,6 +443,104 @@ func (s *State) ListNodes() ([]NodeRow, error) {
 	return out, rows.Err()
 }
 
+// ListNodesChunk returns up to limit node rows with id > afterID, ordered by id.
+// Streaming the nodes table in bounded cursor pages keeps the scheduler from
+// ever holding the whole (~80k) node set in memory at once. node_json is scanned
+// into Data so callers can reconstruct the full model.Node via Node().
+func (s *State) ListNodesChunk(afterID int64, limit int) ([]NodeRow, error) {
+	const q = `
+		SELECT id, hash, name, norm_name, host, port, country, protocol, last_seen_cycle, speed_kbps, node_json
+		FROM nodes WHERE id > ? ORDER BY id LIMIT ?`
+	rows, err := s.db.Query(q, afterID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list nodes chunk: %w", err)
+	}
+	defer rows.Close()
+	var out []NodeRow
+	for rows.Next() {
+		var (
+			id       int64
+			hash     string
+			name     string
+			normName string
+			host     string
+			port     int
+			country  string
+			proto    string
+			cycle    int
+			speed    int
+			nodeJSON string
+		)
+		if err := rows.Scan(&id, &hash, &name, &normName, &host, &port, &country, &proto, &cycle, &speed, &nodeJSON); err != nil {
+			return nil, fmt.Errorf("scan node chunk: %w", err)
+		}
+		out = append(out, NodeRow{
+			ID:            id,
+			Hash:          hash,
+			Name:          name,
+			NormName:      normName,
+			Host:          host,
+			Port:          port,
+			Country:       country,
+			Protocol:      proto,
+			LastSeenCycle: cycle,
+			SpeedKbps:     speed,
+			Data:          nodeJSON,
+		})
+	}
+	return out, rows.Err()
+}
+
+// CountNodes returns the total number of persisted nodes (for progress display).
+func (s *State) CountNodes() (int64, error) {
+	var n int64
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM nodes`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count nodes: %w", err)
+	}
+	return n, nil
+}
+
+// LatestResults returns the most recent results row for each of the given node
+// ids, keyed by node_id. Used by the streaming cycle to seed the ReProbeCycles
+// dead-node skip window without one query per node. An empty ids slice returns
+// an empty map (no query).
+func (s *State) LatestResults(ids []int64) (map[int64]ResultRow, error) {
+	out := make(map[int64]ResultRow, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	ph := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		ph[i] = "?"
+		args[i] = id
+	}
+	const base = `
+		SELECT node_id, alive, latency_ms, speed_kbps, cycle_id FROM (
+			SELECT node_id, alive, latency_ms, speed_kbps, cycle_id,
+			       ROW_NUMBER() OVER (PARTITION BY node_id ORDER BY cycle_id DESC, checked_at DESC) AS rn
+			FROM results WHERE node_id IN (`
+	q := base + strings.Join(ph, ",") + `)) WHERE rn = 1`
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("latest results: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			id    int64
+			alive int
+			lr    ResultRow
+		)
+		if err := rows.Scan(&id, &alive, &lr.LatencyMs, &lr.SpeedKbps, &lr.CycleID); err != nil {
+			return nil, fmt.Errorf("scan latest result: %w", err)
+		}
+		lr.Alive = alive != 0
+		out[id] = lr
+	}
+	return out, rows.Err()
+}
+
 // UpsertNode inserts a node or, if its hash already exists, refreshes its
 // last_seen_cycle (and mutable display fields) without changing added_at. The
 // normalized display name is derived from the node and stored in norm_name; the
@@ -428,7 +549,11 @@ func (s *State) UpsertNode(n *model.Node, cycle int) error {
 	norm := selector.NormName(*n)
 	nb, err := json.Marshal(n)
 	if err != nil {
-		return fmt.Errorf("upsert node: marshal: %w", err)
+		// ponytail: a marshal failure must not abort the whole cycle — store an
+		// empty node_json and keep the denormalized row so the node is still
+		// probeable (Node() falls back to the row columns).
+		log.Printf("state: upsert node marshal failed (storing without node_json): %v", err)
+		nb = []byte("")
 	}
 	_, err = s.db.Exec(
 		`INSERT INTO nodes(hash, protocol, host, port, name, source, country, norm_name, node_json, added_at, last_seen_cycle)
@@ -469,7 +594,9 @@ func (s *State) UpsertNodeWithCountry(node model.Node, country string) error {
 	}
 	nb, err := json.Marshal(&node)
 	if err != nil {
-		return fmt.Errorf("upsert node+country: marshal: %w", err)
+		// ponytail: non-fatal — keep the denormalized row, store empty node_json.
+		log.Printf("state: upsert node+country marshal failed (storing without node_json): %v", err)
+		nb = []byte("")
 	}
 	_, err = tx.Exec(
 		`INSERT INTO nodes(hash, protocol, host, port, name, source, country, norm_name, node_json, added_at, last_seen_cycle)

@@ -714,18 +714,12 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	s.engine.Start()
 	s.setStatus(func(st *Snapshot) { st.Running = true })
 
-	// FIX A: boot rehydration — load every persisted common node into the engine
-	// and rebuild out/ from the persisted subscription table on EVERY start, so a
-	// restart does not lose progress (valid nodes / served files). Runs before the
-	// grace-skip below because the in-memory engine and out/ are lost on restart.
-	// FIX 2: window the sync so all 86k nodes are never marshaled into one config
-	// at once (OOM). At boot no other goroutine touches the engine yet, so no
-	// syncMu guard is needed here.
-	if all, err := s.fullUnion(nil); err == nil && len(all) > 0 {
-		if err := s.syncNodesWindowed(all); err != nil {
-			log.Printf("scheduler: boot sync nodes: %v", err)
-		}
-	}
+	// FIX A: boot rehydration — rebuild out/ from the persisted subscription
+	// table on EVERY start so a restart does not lose the served files. The
+	// engine is no longer pre-loaded with every persisted node at boot: the
+	// first Cycle streams nodes from the DB in bounded chunks (cursor
+	// pagination), which is what fixes the OOM at ~80k nodes. Runs before the
+	// grace-skip below because out/ is lost on restart.
 	if err := s.regenerateSubs(); err != nil {
 		log.Printf("scheduler: boot regenerate subs: %v", err)
 	}
@@ -938,20 +932,16 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 	// by-value copy of every node (`enrichedNodes`) — at 80k nodes with the
 	// heavy Raw field that doubled peak memory and OOM-killed the process. Geo
 	// now writes back into `nodes[i]` directly.
-	countries := make([]string, len(nodes))
-	hashes := make([]string, len(nodes))
 	for i := range nodes {
 		if cctx.Err() != nil {
 			break
 		}
 		n := nodes[i]
-		h := nodeHash(&n)
 		// ponytail: cheap upsert — writes the node to state with no geo. SQLite
 		// allows one writer, so this is the only DB write in this loop.
 		if err := s.st.UpsertNode(&n, cycle); err != nil {
 			return fmt.Errorf("scheduler: upsert node: %w", err)
 		}
-		hashes[i] = h
 		// Raw is only needed by the parse/upsert path; the DB does not store it
 		// and probe/geo/select never read it. Clear it now so the heavy original
 		// URI strings are freed before probeNodes copies the node (and before
@@ -959,6 +949,12 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 		nodes[i].Raw = ""
 	}
 	s.setStatus(func(st *Snapshot) { st.NodesUpserted = len(nodes) })
+
+	// Free the large in-memory node slice before the probe phase. The streaming
+	// loop below reads nodes back from the DB in bounded chunks instead of holding
+	// the whole (~80k) set here — this is what fixes the OOM at scale.
+	nodesTotal := len(nodes)
+	nodes = nil
 
 	// Build skip sets for excluded protocols. Country-based exclusion is
 	// enforced at selection (below), because the country is only resolved after
@@ -979,200 +975,122 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 	// Probe batch: skip excluded countries/protocols. nodes still
 	// derives from the full node set (for upsert/history), but results are only
 	// produced for the filtered slice, so skipped nodes never reach selection.
+	// Stream the probe phase from the SQLite DB in bounded cursor pages so the
+	// process never holds the whole (~80k) node set in memory at once. The
+	// freshly-fetched nodes were already upserted above, so streaming the DB
+	// covers them too. One SyncNodes per chunk is the only per-chunk engine cost
+	// (mihomo has no incremental add), which is acceptable.
 	s.setStatus(func(st *Snapshot) { st.Phase = PhaseProbe })
 
-	// One engine reload for the whole batch, then a bounded fan-out probe.
-	// Previously this was split into a "valid-first" pass + a second pass, each
-	// with its own mihomo config reload (two full rebuilds per cycle). A single
-	// reload + one ProbeFn call is enough: every node — alive or new — is
-	// re-measured each cycle, so corpses in the valid set are still caught. The
-	// reload is required so the per-node Probe hot path finds every node already
-	// present and skips EnsureNode (which would otherwise reload config under the
-	// write lock, serializing the pool back to ~1-by-1).
-	probeNodes := make([]model.Node, 0, len(nodes))
-	skippedReProbe := 0
-	skippedReProbeMin := s.cfg.ReProbeCycles
-	// Recovery valve: nodes the dead-node window would skip are collected here so
-	// that, if the window would skip EVERY candidate, we can re-probe them instead
-	// of producing a permanent empty subscription.
-	skippedNodes := make([]model.Node, 0, len(nodes))
-	for _, n := range nodes {
-		if exclude[strings.ToUpper(n.Country)] || skipProto[strings.ToLower(string(n.Protocol))] {
-			continue
-		}
-		// Dead-node probe-skip (variant B circuit breaker): a node whose latest
-		// result is dead is skipped for ReProbeCycles cycles, then re-probed on
-		// a slow rotation. Never permanent — unlike the old one-way corpse filter.
-		if s.cfg.ReProbeCycles > 0 {
-			if id, e := s.st.NodeID(nodeHash(&n)); e == nil {
-				if lr, e2 := s.st.LatestResult(id); e2 == nil && !lr.Alive &&
-					cycle >= lr.CycleID && cycle-lr.CycleID < s.cfg.ReProbeCycles {
-					// FIX 6: count nodes skipped by the dead-node window so a
-					// fully-skipped cycle is explainable instead of a silent
-					// "0 pings".
-					rem := s.cfg.ReProbeCycles - (cycle - lr.CycleID)
-					if rem < skippedReProbeMin {
-						skippedReProbeMin = rem
-					}
-					skippedReProbe++
-					skippedNodes = append(skippedNodes, n)
-					continue
-				}
-			}
-		}
-		probeNodes = append(probeNodes, n)
-	}
-	// Recovery valve: a dead-node window that skips ALL candidates means probing
-	// nothing, which can leave the subscription empty for many cycles after a
-	// mass-death event (e.g. a previously broken engine marking every node dead).
-	// Re-probe the skipped set so the pipeline can recover; SyncNodes is windowed,
-	// so even a full re-probe is memory-bounded.
-	if len(probeNodes) == 0 && len(skippedNodes) > 0 {
-		probeNodes = append(probeNodes, skippedNodes...)
-		log.Printf("scheduler: cycle %d: ReProbeCycles dead-node window would skip all %d candidates; re-probing to allow recovery", cycle, len(probeNodes))
-	}
-
-	// FIX 6: a cycle that skips EVERY candidate via the ReProbeCycles dead-node
-	// window would otherwise show "0 pings" with no explanation. Log it so the
-	// silent-empty-cycle case is diagnosable.
-	if skippedReProbe > 0 && len(probeNodes) == 0 {
-		log.Printf("scheduler: cycle %d: 0 nodes probed — %d candidate(s) skipped by ReProbeCycles dead-node window; ~%d cycle(s) remaining before re-probe",
-			cycle, skippedReProbe, skippedReProbeMin)
-	}
-
-	// Probe the WHOLE candidate set every cycle, but in bounded windows so mihomo
-	// never has to hold the entire (86k+) node table in memory at once — a single
-	// SyncNodes of all nodes OOMs/crashes the engine. Each window is synced,
-	// probed, and merged; rotation is gone, so no nodes are ever dropped between
-	// cycles. ProbeBatch is the per-window size (memory + SyncNodes cost bound),
-	// not a per-cycle cap — full coverage is the contract.
-	batch := s.cfg.ProbeBatch
-	if batch <= 0 {
+	chunk := s.cfg.ProbeBatch
+	if chunk <= 0 {
 		if w := s.cfg.Workers; w > 0 {
-			batch = w * 10 // 10× workers: user-confirmed "5-10k processes fine at once"
+			chunk = w * 10
 		} else {
-			batch = 3500
+			chunk = 3500
 		}
 	}
-	if batch < 1 {
-		batch = 1
+	if chunk < 1 {
+		chunk = 1
 	}
-
-	out := make(map[string]mihomo.Result, len(probeNodes))
-	if len(probeNodes) > 0 {
-		n := len(probeNodes)
+	if total, err := s.st.CountNodes(); err == nil {
 		s.setStatus(func(st *Snapshot) {
-			st.ProbeTotal = n
+			st.ProbeTotal = int(total)
 			st.ProbeDone = 0
 			st.AliveCount = 0
 			st.DeadCount = 0
 		})
-		// FIX 3: mark the probe phase busy so SubValidity/SubPing skip their own
-		// SyncNodes instead of racing the main cycle and corrupting the engine's
-		// node set (which forced main-cycle probes through EnsureNode → hang).
-		s.probeBusy.Store(true)
-		defer s.probeBusy.Store(false)
-		for start := 0; start < n; start += batch {
-			if cctx.Err() != nil {
-				break // ponytail: clean bail on cycle cancellation
-			}
-			end := start + batch
-			if end > n {
-				end = n
-			}
-			w := probeNodes[start:end]
-			// FIX 3: hold the engine-sync lock across SyncNodes + ProbeFn so no
-			// other goroutine can replace the controller node set mid-window.
-			s.syncMu.Lock()
-			if err := s.engine.SyncNodes(w); err != nil {
-				log.Printf("scheduler: sync nodes: %v", err)
-			}
-			r, e := s.ProbeFn(cctx, w)
-			s.syncMu.Unlock()
-			if e != nil {
-				return fmt.Errorf("scheduler: probe: %w", e)
-			}
-			for h, v := range r {
-				out[h] = v
-			}
-		}
-		// ponytail: re-resolve geo by the egress IP captured during the probe so
-		// the country reflects where traffic actually exits (not the possibly
-		// CDN-rewritten server Host). Runs ONLY for ALIVE nodes — dead nodes are
-		// dropped by the Alive gate at selection and never need a country. GeoFn
-		// falls back to the node Host when no egress IP was captured, so every
-		// alive node gets a correct Country for the exclude/sort at selection.
-		// GeoFn (DNS + mmdb) is the slow part, so resolution runs in a bounded
-		// pool of cfg.Workers goroutines; each touches a distinct index so there
-		// is no race on nodes. SQLite allows one writer, so the upsert is
-		// serialized via upsertMu (geo stays parallel).
-		aliveIdx := make([]int, 0, len(nodes))
-		for i := range nodes {
-			if r, ok := out[hashes[i]]; ok && r.Alive {
-				aliveIdx = append(aliveIdx, i)
-			}
-		}
-		// Cap geo concurrency so the phase lasts long enough for the web UI to
-		// render a visible progress bar (geo is DNS+mmdb and would otherwise
-		// finish near-instantly at full probe-worker parallelism).
-		geoConc := s.cfg.Workers
-		if geoConc > 64 {
-			geoConc = 64
-		}
-		s.setStatus(func(st *Snapshot) {
-			st.Phase = PhaseGeo
-			st.NodesGeoTotal = len(aliveIdx)
-			st.NodesGeoDone = 0
-			st.GeoWorkers = geoConc
-		})
-		var geoWg sync.WaitGroup
-		var upsertMu sync.Mutex
-		// FIX 4: reuse the bounded worker-pool pattern instead of spawning one
-		// goroutine per alive node (up to 86k goroutines → stack OOM). A fixed
-		// pool of geoConc workers drains the alive-index channel.
-		idxCh := make(chan int, len(aliveIdx))
-		for _, i := range aliveIdx {
-			idxCh <- i
-		}
-		close(idxCh)
-		for w := 0; w < geoConc; w++ {
-			geoWg.Add(1)
-			go func() {
-				defer geoWg.Done()
-				for i := range idxCh {
-					if cctx.Err() != nil {
-						return
-					}
-				r := out[hashes[i]]
-				nodes[i].EgressIP = r.EgressIP
-				if cc := s.GeoFn(nodes[i]); cc != "" {
-					countries[i] = cc
-					nodes[i].Country = cc
-					upsertMu.Lock()
-					if err := s.st.UpsertNodeWithCountry(nodes[i], cc); err != nil {
-						log.Printf("scheduler: upsert egress country: %v", err)
-					}
-					upsertMu.Unlock()
-				}
-					s.setStatus(func(st *Snapshot) { st.NodesGeoDone++ })
-				}
-			}()
-		}
-		geoWg.Wait()
-		if cctx.Err() != nil {
-			return nil // ponytail: clean bail on cycle cancellation
-		}
 	}
 
-	// ponytail: probe results are persisted in a single batched transaction at
-	// the end of defaultProbe (see RecordResultsBatch), so the worker pool is
-	// never serialized on the SQLite write lock. nodeViews() refreshes on its
-	// next query.
+	s.probeBusy.Store(true)
+	defer s.probeBusy.Store(false)
 
-	// ponytail: if the cycle was stopped mid-probe, keep the already-collected
-	// results (recorded above) but DO NOT run selection/reconcile/regenerate —
-	// an empty `selected` would wipe the existing subscription. The next cycle
-	// recovers the unprobed nodes.
+	// topK keeps a BOUNDED per-country top-N of alive candidates in memory — the
+	// substitute for holding every alive candidate. selector.Select still ranks
+	// the final merged set, so this only bounds peak memory.
+	topK := make(map[string][]selector.Candidate)
+	topN := s.cfg.TopN
+	afterID := int64(0)
+	for {
+		if cctx.Err() != nil {
+			break
+		}
+		rows, err := s.st.ListNodesChunk(afterID, chunk)
+		if err != nil {
+			log.Printf("scheduler: list nodes chunk: %v", err)
+			break
+		}
+		if len(rows) == 0 {
+			break
+		}
+		afterID = rows[len(rows)-1].ID
+
+		ids := make([]int64, len(rows))
+		for i, r := range rows {
+			ids[i] = r.ID
+		}
+		var latestMap map[int64]state.ResultRow
+		if s.cfg.ReProbeCycles > 0 {
+			latestMap, _ = s.st.LatestResults(ids)
+		}
+
+		chunkCands := make([]model.Node, 0, len(rows))
+		skippedNodes := make([]model.Node, 0, len(rows))
+		for _, r := range rows {
+			n := r.Node()
+			if exclude[strings.ToUpper(n.Country)] || skipProto[strings.ToLower(string(n.Protocol))] {
+				continue
+			}
+			if latestMap != nil {
+				if lr, ok := latestMap[r.ID]; ok && !lr.Alive && cycle >= lr.CycleID && cycle-lr.CycleID < s.cfg.ReProbeCycles {
+					skippedNodes = append(skippedNodes, n)
+					continue
+				}
+			}
+			chunkCands = append(chunkCands, n)
+		}
+		// Recovery valve: a dead-node window that would skip EVERY candidate in
+		// this chunk re-probes them so a mass-death event can still recover.
+		if len(chunkCands) == 0 && len(skippedNodes) > 0 {
+			chunkCands = append(chunkCands, skippedNodes...)
+			log.Printf("scheduler: cycle %d: ReProbeCycles dead-node window would skip all %d candidates in chunk; re-probing to allow recovery", cycle, len(chunkCands))
+		}
+		if len(chunkCands) == 0 {
+			rows = nil
+			continue
+		}
+
+		byHash := make(map[string]model.Node, len(chunkCands))
+		for _, n := range chunkCands {
+			byHash[nodeHash(&n)] = n
+		}
+		s.syncMu.Lock()
+		if err := s.engine.SyncNodes(chunkCands); err != nil {
+			log.Printf("scheduler: sync nodes: %v", err)
+		}
+		results, e := s.ProbeFn(cctx, chunkCands)
+		s.syncMu.Unlock()
+		if e != nil {
+			return fmt.Errorf("scheduler: probe: %w", e)
+		}
+		for h, res := range results {
+			if !res.Alive {
+				continue
+			}
+			n := byHash[h]
+			n.EgressIP = res.EgressIP
+			cc := s.GeoFn(n)
+			if cc != "" {
+				n.Country = cc
+				s.st.UpsertNodeWithCountry(n, cc)
+			}
+			addToTopK(topK, selector.Candidate{Node: n, LatencyMs: int(res.LatencyMs), Country: cc, Hash: h}, topN)
+		}
+		rows = nil
+		chunkCands = nil
+		byHash = nil
+	}
+
 	if cctx.Err() != nil {
 		return nil
 	}
@@ -1185,40 +1103,10 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 		log.Printf("[scheduler] prune: %v", err)
 	}
 
-	// Build candidates from alive nodes only. Banned nodes are dropped here so
-	// they can never reach a generated subscription. The min-speed brake drops
-	// nodes whose measured throughput is below the configured floor.
-	// Drop nodes whose resolved country is in the exclude list so they can
-	// never reach a generated subscription. The country is resolved after the
-	// probe (geo by egress IP) and applied here as the real enforcement point.
-	// Build candidates from the persisted latest measurement. A node keeps its
-	// last-known liveness if this cycle's probe errored, so a transient infra
-	// blip can't silently drop it from the subscription.
+	// Build candidates from the bounded per-country top-K accumulated above.
 	var cands []selector.Candidate
-	floorKbps := s.cfg.MinSpeedMbps * 1000
-	for i := range nodes {
-		if s.cfg.IsBanned != nil && s.cfg.IsBanned(hashes[i]) {
-			continue
-		}
-		if exclude[strings.ToUpper(countries[i])] {
-			continue
-		}
-		id, e := s.st.NodeID(hashes[i])
-		if e != nil {
-			continue
-		}
-		lr, e2 := s.st.LatestResult(id)
-		if e2 != nil || !lr.Alive {
-			continue
-		}
-		if floorKbps > 0 && lr.SpeedKbps < floorKbps {
-			continue
-		}
-		cands = append(cands, selector.Candidate{
-			Node:      nodes[i],
-			LatencyMs: lr.LatencyMs,
-			Country:   countries[i],
-		})
+	for _, grp := range topK {
+		cands = append(cands, grp...)
 	}
 
 	s.setStatus(func(st *Snapshot) {
@@ -1283,7 +1171,7 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 	}
 
 	log.Printf("scheduler: cycle %d done: %d sources, %d nodes, %d selected",
-		cycle, len(sources), len(nodes), len(selected))
+		cycle, len(sources), nodesTotal, len(selected))
 	if err := s.st.SetLastSuccess(time.Now()); err != nil {
 		log.Printf("scheduler: record last success: %v", err)
 	}
@@ -1663,23 +1551,22 @@ func (s *Scheduler) ReplaceRoutine(deadHash string) error {
 		cands = cands[:5]
 	}
 
-	// Build the FULL union: common alive ∪ subscription members ∪ candidates,
-	// so SyncNodes never drops a subscription member or other proxy. Candidates
-	// are appended last (see fullUnion) so they land in the final window and
-	// stay loaded for the probe below.
-	union, err := s.fullUnion(cands)
-	if err != nil {
-		return fmt.Errorf("full union: %w", err)
+	// Sync ONLY the candidate set (the dead member's same-country replacements)
+	// into the engine — never the full 86k common pool (that was the OOM source).
+	// The subscription members stay loaded via the next Cycle; this routine only
+	// needs to ping these candidates. Hold syncMu so no concurrent cycle/timer
+	// can corrupt the engine set mid-sync (ReplaceRoutine is reached from
+	// SubValidity's post-processing, which has released syncMu, so this cannot
+	// deadlock). The lock is held for the whole sync+probe so the candidate probe
+	// below always sees its nodes.
+	candNodes := make([]model.Node, 0, len(cands))
+	for _, c := range cands {
+		candNodes = append(candNodes, c.Node)
 	}
-	// FIX 2 + FIX 3: sync the union in bounded windows (never all 86k at once →
-	// OOM) and hold syncMu so no concurrent cycle/timer can corrupt the set
-	// mid-sync. ReplaceRoutine is only reached from SubValidity's post-processing
-	// (which has released syncMu), so this cannot deadlock. The lock is held for
-	// the whole sync+probe so the candidate probe below always sees its nodes.
 	s.syncMu.Lock()
 	defer s.syncMu.Unlock()
-	if err := s.syncNodesWindowed(union); err != nil {
-		log.Printf("scheduler: replace routine windowed sync: %v", err)
+	if err := s.engine.SyncNodes(candNodes); err != nil {
+		log.Printf("scheduler: replace routine sync: %v", err)
 	}
 
 	// Fresh-ping each candidate; swap the first alive in.
@@ -1706,80 +1593,6 @@ func (s *Scheduler) ReplaceRoutine(deadHash string) error {
 	// None alive: drop the dead member so it is excluded from output.
 	_ = s.st.RemoveSubscription(deadHash)
 	return s.regenerateSubs()
-}
-
-// syncNodesWindowed loads nodes into the engine in bounded windows so the
-// embedded mihomo hub never has to marshal/hold the entire (86k+) node set in
-// one config reload (which OOMs/crashes). Each window replaces the engine set,
-// so callers must probe the window's nodes immediately after — mirroring the
-// main cycle. It does NOT take syncMu; the caller is responsible for guarding
-// concurrent SyncNodes calls.
-func (s *Scheduler) syncNodesWindowed(nodes []model.Node) error {
-	if len(nodes) == 0 {
-		return nil
-	}
-	batch := s.cfg.ProbeBatch
-	if batch <= 0 {
-		if w := s.cfg.Workers; w > 0 {
-			batch = w * 10 // 10× workers: user-confirmed "5-10k processes fine at once"
-		} else {
-			batch = 3500
-		}
-	}
-	if batch < 1 {
-		batch = 1
-	}
-	var firstErr error
-	for start := 0; start < len(nodes); start += batch {
-		end := start + batch
-		if end > len(nodes) {
-			end = len(nodes)
-		}
-		if err := s.engine.SyncNodes(nodes[start:end]); err != nil {
-			if firstErr == nil {
-				firstErr = err
-			}
-			log.Printf("scheduler: windowed sync nodes: %v", err)
-		}
-	}
-	return firstErr
-}
-
-// fullUnion returns the complete node set to hand to SyncNodes: every common
-// alive node, every current subscription member, plus the given candidates.
-// This guarantees subscription ⊆ synced set, so a reload never wipes a member.
-func (s *Scheduler) fullUnion(extra []selector.Candidate) ([]model.Node, error) {
-	seen := make(map[string]bool)
-	var out []model.Node
-	add := func(n model.Node) {
-		h := nodeHash(&n)
-		if seen[h] {
-			return
-		}
-		seen[h] = true
-		out = append(out, n)
-	}
-	common, err := s.st.ListNodes()
-	if err != nil {
-		return nil, err
-	}
-	for _, nr := range common {
-		if !nr.Alive {
-			continue
-		}
-		add(model.Node{Protocol: model.Scheme(nr.Protocol), Host: nr.Host, Port: nr.Port, Name: nr.Name, Country: nr.Country, User: nr.Name})
-	}
-	members, err := s.st.SubscriptionMemberNodes()
-	if err != nil {
-		return nil, err
-	}
-	for _, n := range members {
-		add(n)
-	}
-	for _, c := range extra {
-		add(c.Node)
-	}
-	return out, nil
 }
 
 // SubStatus returns a per-pool status snapshot for the web UI.
@@ -1845,4 +1658,18 @@ func (s *Scheduler) Stop() {
 func nodeHash(n *model.Node) string {
 	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%d|%s|%s|%s", n.Protocol, n.Host, n.Port, n.User, n.Security, n.Encryption)))
 	return hex.EncodeToString(sum[:])
+}
+
+// addToTopK appends c to the per-country top-K, keeping at most topN
+// lowest-latency candidates per country so peak memory stays bounded regardless
+// of the total node count (the streaming cycle never holds every alive node).
+func addToTopK(topK map[string][]selector.Candidate, c selector.Candidate, topN int) {
+	grp := append(topK[c.Country], c)
+	if len(grp) > topN {
+		sort.SliceStable(grp, func(i, j int) bool {
+			return grp[i].LatencyMs < grp[j].LatencyMs
+		})
+		grp = grp[:topN]
+	}
+	topK[c.Country] = grp
 }
