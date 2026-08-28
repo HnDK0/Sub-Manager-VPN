@@ -66,6 +66,13 @@ type Server struct {
 	sseTickets map[string]time.Time
 
 	nodesGuard sync.Mutex // serializes the async node-views SSE publisher
+
+	kpiMu        sync.Mutex // guards the nodeKPIs TTL cache below
+	kpiAt        time.Time
+	kpiTotal     int
+	kpiAlive     int
+	kpiWorking   int
+	kpiCountries int
 }
 
 // New builds a Server. It does not start listening; call Start. store backs the
@@ -232,21 +239,44 @@ func (s *Server) publishNodesAsync(lastNodes, lastAlive *int) {
 	}
 	go func() {
 		defer s.nodesGuard.Unlock()
-		views, err := s.nodeViews()
-		if err != nil {
-			return
-		}
-		alive := 0
-		for _, v := range views {
-			if v.Alive {
-				alive++
-			}
-		}
-		if len(views) != *lastNodes || alive != *lastAlive {
-			*lastNodes, *lastAlive = len(views), alive
-			s.hub.Publish(Event{Type: "nodes", Payload: views})
+		total, alive, _, _ := s.nodeKPIs()
+		if total != *lastNodes || alive != *lastAlive {
+			*lastNodes, *lastAlive = total, alive
+			s.hub.Publish(Event{Type: "nodes", Payload: map[string]any{"ok": true}})
 		}
 	}()
+}
+
+// nodeKPIs returns aggregate node stats (total / alive / working / distinct
+// countries) with a short TTL, so the SSE status publisher — which fires on
+// every status delta during a probe cycle — never scans the full node table
+// repeatedly. Recomputed at most once per 2s.
+func (s *Server) nodeKPIs() (total, alive, working, countries int) {
+	s.kpiMu.Lock()
+	if !s.kpiAt.IsZero() && time.Since(s.kpiAt) < 2*time.Second {
+		t, a, w, c := s.kpiTotal, s.kpiAlive, s.kpiWorking, s.kpiCountries
+		s.kpiMu.Unlock()
+		return t, a, w, c
+	}
+	s.kpiMu.Unlock()
+
+	db := s.st.DB()
+	_ = db.QueryRow("SELECT COUNT(*) FROM nodes").Scan(&total)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM nodes n LEFT JOIN (
+		SELECT node_id, alive, latency_ms,
+		       ROW_NUMBER() OVER (PARTITION BY node_id ORDER BY cycle_id DESC, checked_at DESC) AS rn
+		FROM results) r ON r.node_id = n.id AND r.rn = 1 WHERE COALESCE(r.alive,0)=1`).Scan(&alive)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM nodes n LEFT JOIN (
+		SELECT node_id, alive, latency_ms,
+		       ROW_NUMBER() OVER (PARTITION BY node_id ORDER BY cycle_id DESC, checked_at DESC) AS rn
+		FROM results) r ON r.node_id = n.id AND r.rn = 1 WHERE COALESCE(r.alive,0)=1 AND COALESCE(r.latency_ms,0)>0`).Scan(&working)
+	_ = db.QueryRow("SELECT COUNT(DISTINCT country) FROM nodes WHERE country <> ''").Scan(&countries)
+
+	s.kpiMu.Lock()
+	s.kpiTotal, s.kpiAlive, s.kpiWorking, s.kpiCountries = total, alive, working, countries
+	s.kpiAt = time.Now()
+	s.kpiMu.Unlock()
+	return total, alive, working, countries
 }
 
 // auth enforces the token on a handler (Bearer header primary; ?token= only for

@@ -44,14 +44,14 @@ func (s *Server) handleTestNodes(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	views, err := s.nodeViews()
+	hashes := make([]string, 0, len(hashToNode))
+	for h := range hashToNode {
+		hashes = append(hashes, h)
+	}
+	viewByHash, err := s.nodeViewsByHashes(hashes)
 	if err != nil {
 		writeJSONErrorLog(w, http.StatusInternalServerError, "failed to list nodes", err)
 		return
-	}
-	viewByHash := make(map[string]NodeView, len(views))
-	for _, v := range views {
-		viewByHash[v.Hash] = v
 	}
 	var selected []model.Node
 	if pool == "subscription" {
@@ -123,9 +123,7 @@ func (s *Server) handleTestNodes(w http.ResponseWriter, r *http.Request) {
 		}
 		out[oh] = map[string]any{"alive": res.Alive, "latencyMs": res.LatencyMs, "speedKbps": res.SpeedKbps, "probes": res.ProbeCount}
 	}
-	if fresh, err := s.nodeViews(); err == nil {
-		s.hub.Publish(Event{Type: "nodes", Payload: fresh})
-	}
+	s.hub.Publish(Event{Type: "nodes", Payload: map[string]any{"ok": true}})
 	writeJSON(w, map[string]any{"cycle": cycle, "results": out})
 }
 
@@ -313,9 +311,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	// Initial snapshot so the UI populates immediately on connect.
 	s.writeSSE(w, flusher, Event{Type: "status", Payload: s.buildStatus()})
 	s.writeSSE(w, flusher, Event{Type: "pipeline", Payload: s.sch.Status()})
-	if views, err := s.nodeViews(); err == nil {
-		s.writeSSE(w, flusher, Event{Type: "nodes", Payload: views})
-	}
+	s.writeSSE(w, flusher, Event{Type: "nodes", Payload: map[string]any{"ok": true}})
 	// Replay recent historical logs so the Logs panel isn't empty until live
 	// logs arrive.
 	for _, line := range s.logCap.Recent(100) {

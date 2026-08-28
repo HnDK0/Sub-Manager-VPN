@@ -6,7 +6,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -30,14 +29,6 @@ type NodeView struct {
 	Alive     bool   `json:"alive"`
 	LatencyMs int    `json:"latencyMs"`
 	SpeedKbps int    `json:"speedKbps"`
-}
-
-// countrySortKey places empty/"unknown" countries last when sorting ascending.
-func countrySortKey(c string) string {
-	if c == "" || strings.EqualFold(c, "unknown") {
-		return "\uffff"
-	}
-	return c
 }
 
 // subscriptionProfileTitle is the name Hiddify/Happ show after importing a
@@ -70,22 +61,8 @@ func writeJSONErrorLog(w http.ResponseWriter, code int, msg string, err error) {
 // buildStatus combines the scheduler snapshot with KPIs derived from node rows.
 func (s *Server) buildStatus() map[string]any {
 	snap := s.sch.Status()
-	views, _ := s.nodeViews()
-	total := len(views)
-	alive := 0
-	working := 0
-	countries := map[string]struct{}{}
-	for _, v := range views {
-		if v.Alive {
-			alive++
-		}
-		if v.Alive && v.LatencyMs > 0 {
-			working++
-		}
-		if v.Country != "" {
-			countries[v.Country] = struct{}{}
-		}
-	}
+	total, alive, working, countries := s.nodeKPIs()
+	dead := total - alive
 	sources, _ := s.reg.ListSources()
 	return map[string]any{
 		"running":        snap.Running,
@@ -100,6 +77,7 @@ func (s *Server) buildStatus() map[string]any {
 		"nodesFetched":   snap.NodesFetched,
 		"nodesGeoTotal":  snap.NodesGeoTotal,
 		"nodesGeoDone":   snap.NodesGeoDone,
+		"geoWorkers":     snap.GeoWorkers,
 		"nodesAlive":     snap.NodesAlive,
 		"lastCycleDurMs": snap.LastCycleDur.Milliseconds(),
 		"lastError":      snap.LastError,
@@ -107,56 +85,12 @@ func (s *Server) buildStatus() map[string]any {
 			"total":     total,
 			"alive":     alive,
 			"working":   working,
-			"dead":      total - alive,
-			"countries": len(countries),
+			"dead":      dead,
+				"countries": countries,
 		},
 		"sources":      len(sources),
 		"subscription": s.sch.SubStatus(),
 	}
-}
-
-// nodeViews joins nodes with their latest result via the public st.DB() handle.
-func (s *Server) nodeViews() ([]NodeView, error) {
-	db := s.st.DB()
-	const q = `
-		SELECT n.id, n.hash, n.name, n.norm_name, n.host, n.port, n.country, n.protocol,
-		       COALESCE(r.alive,0), COALESCE(r.latency_ms,0), COALESCE(n.speed_kbps,0)
-		FROM nodes n
-		LEFT JOIN (
-			SELECT node_id, alive, latency_ms,
-			       ROW_NUMBER() OVER (PARTITION BY node_id ORDER BY cycle_id DESC, checked_at DESC) AS rn
-			FROM results
-		) r ON r.node_id = n.id AND r.rn = 1
-		ORDER BY n.id`
-	rows, err := db.Query(q)
-	if err != nil {
-		return nil, fmt.Errorf("web: node views: %w", err)
-	}
-	defer rows.Close()
-	var out []NodeView
-	for rows.Next() {
-		var (
-			id       int64
-			hash     string
-			name     string
-			normName string
-			host     string
-			port     int
-			country  string
-			proto    string
-			alive    int
-			latency  int
-			speed    int
-		)
-		if err := rows.Scan(&id, &hash, &name, &normName, &host, &port, &country, &proto, &alive, &latency, &speed); err != nil {
-			return nil, fmt.Errorf("web: scan node: %w", err)
-		}
-		out = append(out, NodeView{
-			ID: id, Hash: hash, Name: normName, NormName: normName, Host: host, Port: port,
-			Country: country, Protocol: proto, Alive: alive != 0, LatencyMs: latency, SpeedKbps: speed,
-		})
-	}
-	return out, rows.Err()
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -292,131 +226,160 @@ func (s *Server) handlePutSource(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"id": id, "url": newURL})
 }
 
-func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
-	views, err := s.nodeViews()
+// nodeViewsByHashes returns NodeViews for the given node hashes only — used by
+// endpoints that enrich a known subset (subscription members, a manual probe
+// selection) so they never materialize the full node table.
+func (s *Server) nodeViewsByHashes(hashes []string) (map[string]NodeView, error) {
+	db := s.st.DB()
+	out := make(map[string]NodeView, len(hashes))
+	if len(hashes) == 0 {
+		return out, nil
+	}
+	ph := make([]string, len(hashes))
+	args := make([]any, len(hashes))
+	for i, h := range hashes {
+		ph[i] = "?"
+		args[i] = h
+	}
+	q := `
+		SELECT n.id, n.hash, n.name, n.norm_name, n.host, n.port, n.country, n.protocol,
+		       COALESCE(r.alive,0), COALESCE(r.latency_ms,0), COALESCE(n.speed_kbps,0)
+		FROM nodes n
+		LEFT JOIN (
+			SELECT node_id, alive, latency_ms,
+			       ROW_NUMBER() OVER (PARTITION BY node_id ORDER BY cycle_id DESC, checked_at DESC) AS rn
+			FROM results
+		) r ON r.node_id = n.id AND r.rn = 1
+		WHERE n.hash IN (` + strings.Join(ph, ",") + `)`
+	rows, err := db.Query(q, args...)
 	if err != nil {
-		writeJSONErrorLog(w, http.StatusInternalServerError, "failed to list nodes", err)
+		return nil, fmt.Errorf("web: node views by hashes: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			id       int64
+			hash     string
+			name     string
+			normName string
+			host     string
+			port     int
+			country  string
+			proto    string
+			alive    int
+			latency  int
+			speed    int
+		)
+		if err := rows.Scan(&id, &hash, &name, &normName, &host, &port, &country, &proto, &alive, &latency, &speed); err != nil {
+			return nil, fmt.Errorf("web: scan node: %w", err)
+		}
+		out[hash] = NodeView{
+			ID: id, Hash: hash, Name: normName, NormName: normName, Host: host, Port: port,
+			Country: country, Protocol: proto, Alive: alive != 0, LatencyMs: latency, SpeedKbps: speed,
+		}
+	}
+	return out, rows.Err()
+}
+
+func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	db := s.st.DB()
+
+	const fromJoin = `
+		FROM nodes n
+		LEFT JOIN (
+			SELECT node_id, alive, latency_ms,
+			       ROW_NUMBER() OVER (PARTITION BY node_id ORDER BY cycle_id DESC, checked_at DESC) AS rn
+			FROM results
+		) r ON r.node_id = n.id AND r.rn = 1`
+
+	var where []string
+	var args []any
+
+	if strings.TrimSpace(q.Get("pool")) == "subscription" {
+		where = append(where, "n.hash IN (SELECT node_id FROM subscription)")
+	}
+	if country := strings.TrimSpace(q.Get("country")); country != "" {
+		if strings.EqualFold(country, "unknown") {
+			where = append(where, "n.country = ''")
+		} else {
+			codes := strings.Split(country, ",")
+			ph := make([]string, 0, len(codes))
+			for _, c := range codes {
+				c = strings.ToUpper(strings.TrimSpace(c))
+				if c != "" {
+					ph = append(ph, "?")
+					args = append(args, c)
+				}
+			}
+			if len(ph) > 0 {
+				where = append(where, "UPPER(n.country) IN ("+strings.Join(ph, ",")+")")
+			}
+		}
+	}
+	if protocol := strings.TrimSpace(q.Get("protocol")); protocol != "" {
+		where = append(where, "LOWER(n.protocol) = LOWER(?)")
+		args = append(args, protocol)
+	}
+	if ml := parseIntQuery(r, "maxlatency"); ml > 0 {
+		where = append(where, "COALESCE(r.latency_ms,0) > 0 AND COALESCE(r.latency_ms,0) <= ?")
+		args = append(args, ml)
+	}
+	switch strings.TrimSpace(q.Get("status")) {
+	case "alive":
+		where = append(where, "COALESCE(r.alive,0) = 1")
+	case "dead":
+		where = append(where, "COALESCE(r.alive,0) = 0")
+	}
+	if alive := strings.TrimSpace(q.Get("alive")); alive == "true" {
+		where = append(where, "COALESCE(r.alive,0) = 1")
+	} else if alive == "false" {
+		where = append(where, "COALESCE(r.alive,0) = 0")
+	}
+	if strings.TrimSpace(q.Get("working")) == "true" {
+		where = append(where, "COALESCE(r.alive,0) = 1 AND COALESCE(r.latency_ms,0) > 0")
+	}
+
+	whereSQL := ""
+	if len(where) > 0 {
+		whereSQL = " WHERE " + strings.Join(where, " AND ")
+	}
+
+	var total int
+	if err := db.QueryRow("SELECT COUNT(*) "+fromJoin+whereSQL, args...).Scan(&total); err != nil {
+		writeJSONErrorLog(w, http.StatusInternalServerError, "count nodes", err)
 		return
 	}
-	pool := strings.TrimSpace(r.URL.Query().Get("pool"))
-	if pool == "subscription" {
-		// Restrict to current subscription members (preserving NodeView fields).
-		subs, err := s.st.ListSubscription()
-		if err != nil {
-			writeJSONErrorLog(w, http.StatusInternalServerError, "subscription list", err)
-			return
-		}
-		inSub := make(map[string]struct{}, len(subs))
-		for _, r := range subs {
-			inSub[r.NodeID] = struct{}{}
-		}
-		views = filterNodeViews(views, func(v NodeView) bool {
-			_, ok := inSub[v.Hash]
-			return ok
-		})
-	}
-	country := strings.TrimSpace(r.URL.Query().Get("country"))
-	alive := strings.TrimSpace(r.URL.Query().Get("alive"))
-	working := strings.TrimSpace(r.URL.Query().Get("working"))
-	protocol := strings.TrimSpace(r.URL.Query().Get("protocol"))
-	status := strings.TrimSpace(r.URL.Query().Get("status"))
-	maxLatency := parseIntQuery(r, "maxlatency")
-
-	filtered := views
-	if country != "" {
-		if strings.EqualFold(country, "unknown") {
-			// Group empty/"XX" country as Unknown.
-			filtered = filterNodeViews(filtered, func(v NodeView) bool { return v.Country == "" })
-		} else {
-			// Comma-separated 2-letter codes -> Country IN set.
-			codes := strings.Split(country, ",")
-			for i := range codes {
-				codes[i] = strings.ToUpper(strings.TrimSpace(codes[i]))
-			}
-			filtered = filterNodeViews(filtered, func(v NodeView) bool {
-				vu := strings.ToUpper(v.Country)
-				for _, c := range codes {
-					if c == vu {
-						return true
-					}
-				}
-				return false
-			})
-		}
-	}
-	if protocol != "" {
-		filtered = filterNodeViews(filtered, func(v NodeView) bool { return strings.EqualFold(v.Protocol, protocol) })
-	}
-	if maxLatency > 0 {
-		filtered = filterNodeViews(filtered, func(v NodeView) bool { return v.LatencyMs > 0 && v.LatencyMs <= maxLatency })
-	}
-	switch status {
-	case "alive":
-		filtered = filterNodeViews(filtered, func(v NodeView) bool { return v.Alive })
-	case "dead":
-		filtered = filterNodeViews(filtered, func(v NodeView) bool { return !v.Alive })
-	}
-	if alive == "true" {
-		filtered = filterNodeViews(filtered, func(v NodeView) bool { return v.Alive })
-	} else if alive == "false" {
-		filtered = filterNodeViews(filtered, func(v NodeView) bool { return !v.Alive })
-	}
-	if working == "true" {
-		// Working only: alive AND a measured latency > 0.
-		filtered = filterNodeViews(filtered, func(v NodeView) bool { return v.Alive && v.LatencyMs > 0 })
+	aliveWhere := append([]string{"COALESCE(r.alive,0) = 1"}, where...)
+	aliveSQL := " WHERE " + strings.Join(aliveWhere, " AND ")
+	var aliveCount int
+	if err := db.QueryRow("SELECT COUNT(*) "+fromJoin+aliveSQL, args...).Scan(&aliveCount); err != nil {
+		writeJSONErrorLog(w, http.StatusInternalServerError, "count alive nodes", err)
+		return
 	}
 
-	// Optional client-side sorting of the already-filtered set. Unrecognized or
-	// absent `sort` keeps the existing nodeViews() ORDER BY n.id ordering.
-	sortParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("sort")))
-	orderParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("order")))
-	desc := orderParam == "desc" // empty/invalid -> asc (default)
+	sortParam := strings.ToLower(strings.TrimSpace(q.Get("sort")))
+	orderParam := strings.ToLower(strings.TrimSpace(q.Get("order")))
+	desc := orderParam == "desc"
+	var orderSQL string
 	switch sortParam {
-	case "latency", "country", "protocol", "name", "alive":
-		sort.SliceStable(filtered, func(i, j int) bool {
-			a, b := filtered[i], filtered[j]
-			switch sortParam {
-			case "latency":
-				// 0 (missing) treated as worst -> placed last for asc.
-				if a.LatencyMs == 0 && b.LatencyMs == 0 {
-					return false
-				}
-				if a.LatencyMs == 0 {
-					return false
-				}
-				if b.LatencyMs == 0 {
-					return true
-				}
-				return a.LatencyMs < b.LatencyMs
-			case "country":
-				return countrySortKey(a.Country) < countrySortKey(b.Country)
-			case "protocol":
-				return a.Protocol < b.Protocol
-			case "name":
-				return a.NormName < b.NormName
-			case "alive":
-				// asc: dead first; reversed (desc) -> alive first.
-				if a.Alive == b.Alive {
-					return false
-				}
-				return !a.Alive
-			}
-			return false
-		})
-		if desc {
-			for i, j := 0, len(filtered)-1; i < j; i, j = i+1, j-1 {
-				filtered[i], filtered[j] = filtered[j], filtered[i]
-			}
-		}
+	case "latency":
+		orderSQL = "ORDER BY (COALESCE(r.latency_ms,0)=0), COALESCE(r.latency_ms,0)"
+	case "country":
+		orderSQL = "ORDER BY CASE WHEN n.country = '' THEN 'zz' ELSE n.country END"
+	case "protocol":
+		orderSQL = "ORDER BY n.protocol"
+	case "name":
+		orderSQL = "ORDER BY n.norm_name"
+	case "alive":
+		orderSQL = "ORDER BY COALESCE(r.alive,0)"
+	default:
+		orderSQL = "ORDER BY n.id"
 	}
-
-	total := len(filtered)
-
-	aliveCount := 0
-	for _, v := range filtered {
-		if v.Alive {
-			aliveCount++
-		}
+	if desc {
+		orderSQL += " DESC"
+	} else {
+		orderSQL += " ASC"
 	}
 
 	limit := 50
@@ -430,18 +393,43 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 	if o := parseIntQuery(r, "offset"); o > 0 {
 		offset = o
 	}
-	if offset > total {
-		offset = total
+
+	pageQ := "SELECT n.id, n.hash, n.name, n.norm_name, n.host, n.port, n.country, n.protocol, " +
+		"COALESCE(r.alive,0), COALESCE(r.latency_ms,0), COALESCE(n.speed_kbps,0) " +
+		fromJoin + whereSQL + " " + orderSQL + " LIMIT ? OFFSET ?"
+	rows, err := db.Query(pageQ, append(append([]any{}, args...), limit, offset)...)
+	if err != nil {
+		writeJSONErrorLog(w, http.StatusInternalServerError, "list nodes", err)
+		return
 	}
-	page := filtered
-	if offset < len(page) {
-		end := offset + limit
-		if end > len(page) {
-			end = len(page)
+	defer rows.Close()
+	var out []NodeView
+	for rows.Next() {
+		var (
+			id       int64
+			hash     string
+			name     string
+			normName string
+			host     string
+			port     int
+			country  string
+			proto    string
+			alive    int
+			latency  int
+			speed    int
+		)
+		if err := rows.Scan(&id, &hash, &name, &normName, &host, &port, &country, &proto, &alive, &latency, &speed); err != nil {
+			writeJSONErrorLog(w, http.StatusInternalServerError, "scan node", err)
+			return
 		}
-		page = page[offset:end]
-	} else {
-		page = []NodeView{}
+		out = append(out, NodeView{
+			ID: id, Hash: hash, Name: normName, NormName: normName, Host: host, Port: port,
+			Country: country, Protocol: proto, Alive: alive != 0, LatencyMs: latency, SpeedKbps: speed,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		writeJSONErrorLog(w, http.StatusInternalServerError, "node rows", err)
+		return
 	}
 
 	writeJSON(w, map[string]any{
@@ -449,7 +437,7 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 		"alive":  aliveCount,
 		"limit":  limit,
 		"offset": offset,
-		"nodes":  page,
+		"nodes":  out,
 	})
 }
 
@@ -511,9 +499,7 @@ func (s *Server) handleSubAdd(w http.ResponseWriter, r *http.Request) {
 	if err := s.sch.RegenerateSubs(); err != nil {
 		log.Printf("web: regenerate after add: %v", err)
 	}
-	if views, err := s.nodeViews(); err == nil {
-		s.hub.Publish(Event{Type: "nodes", Payload: views})
-	}
+	s.hub.Publish(Event{Type: "nodes", Payload: map[string]any{"ok": true}})
 	writeJSON(w, map[string]any{"added": hash, "ok": true})
 }
 
@@ -532,9 +518,7 @@ func (s *Server) handleSubRemove(w http.ResponseWriter, r *http.Request) {
 	if err := s.sch.RegenerateSubs(); err != nil {
 		log.Printf("web: regenerate after remove: %v", err)
 	}
-	if views, err := s.nodeViews(); err == nil {
-		s.hub.Publish(Event{Type: "nodes", Payload: views})
-	}
+	s.hub.Publish(Event{Type: "nodes", Payload: map[string]any{"ok": true}})
 	writeJSON(w, map[string]any{"removed": hash, "ok": true})
 }
 
@@ -546,14 +530,14 @@ func (s *Server) handleSubList(w http.ResponseWriter, r *http.Request) {
 		writeJSONErrorLog(w, http.StatusInternalServerError, "list subscription", err)
 		return
 	}
-	views, err := s.nodeViews()
+	hashes := make([]string, 0, len(rows))
+	for _, row := range rows {
+		hashes = append(hashes, row.NodeID)
+	}
+	viewByHash, err := s.nodeViewsByHashes(hashes)
 	if err != nil {
 		writeJSONErrorLog(w, http.StatusInternalServerError, "node views", err)
 		return
-	}
-	viewByHash := make(map[string]NodeView, len(views))
-	for _, v := range views {
-		viewByHash[v.Hash] = v
 	}
 	out := make([]map[string]any, 0, len(rows))
 	for _, row := range rows {
@@ -627,16 +611,7 @@ func isValidCountry(code string) bool {
 	return up[0] >= 'A' && up[0] <= 'Z' && up[1] >= 'A' && up[1] <= 'Z'
 }
 
-// filterNodeViews returns the subset of views matching pred.
-func filterNodeViews(views []NodeView, pred func(NodeView) bool) []NodeView {
-	out := make([]NodeView, 0, len(views))
-	for _, v := range views {
-		if pred(v) {
-			out = append(out, v)
-		}
-	}
-	return out
-}
+
 
 // parseIntQuery parses a non-negative integer query param, returning 0 on
 // missing/invalid input.
