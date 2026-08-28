@@ -492,7 +492,6 @@ func sourceMetaFrom(fetched []fetch.FetchedSource) state.SourceMeta {
 // defaultProbe probes every node through the engine and returns results keyed
 // by node hash.
 func (s *Scheduler) defaultProbe(ctx context.Context, nodes []model.Node) (map[string]mihomo.Result, error) {
-	s.setStatus(func(st *Snapshot) { st.ProbeTotal = len(nodes); st.ProbeDone = 0 })
 	out := make(map[string]mihomo.Result, len(nodes))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -530,7 +529,6 @@ func (s *Scheduler) defaultProbe(ctx context.Context, nodes []model.Node) (map[s
 			out[nodeHash(&n)] = r
 			mu.Unlock()
 			s.setStatus(func(st *Snapshot) {
-				st.ProbeDone++ // ponytail: live probe progress for the UI
 				if r.Alive {
 					st.AliveCount++
 				} else {
@@ -893,44 +891,53 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 		probeNodes = append(probeNodes, n)
 	}
 
-	// Cap probe work per cycle so a huge node set can't OOM/crash the engine
-	// (thousands of concurrent mihomo probes). Coverage is eventually complete:
-	// a deterministic rotation walks the full set across cycles, fine for 24/7.
+	// Probe the WHOLE candidate set every cycle, but in bounded windows so mihomo
+	// never has to hold the entire (86k+) node table in memory at once — a single
+	// SyncNodes of all nodes OOMs/crashes the engine. Each window is synced,
+	// probed, and merged; rotation is gone, so no nodes are ever dropped between
+	// cycles. ProbeBatch is the per-window size (memory + SyncNodes cost bound),
+	// not a per-cycle cap — full coverage is the contract.
 	batch := s.cfg.ProbeBatch
 	if batch <= 0 {
-		// Auto: 10× the probe-worker count, so the worker pool is always fully
-		// utilized while per-cycle mihomo load stays bounded. Falls back to a
-		// fixed sane value if Workers is somehow unset.
 		if w := s.cfg.Workers; w > 0 {
-			batch = w * 10
+			batch = w * 10 // 10× workers: user-confirmed "5-10k processes fine at once"
 		} else {
 			batch = 3500
 		}
 	}
-	if len(probeNodes) > batch {
-		sort.Slice(probeNodes, func(i, j int) bool {
-			return nodeHash(&probeNodes[i]) < nodeHash(&probeNodes[j])
-		})
-		n := len(probeNodes)
-		off := (cycle * batch) % n
-		end := off + batch
-		if end > n {
-			b := append([]model.Node{}, probeNodes[off:]...)
-			b = append(b, probeNodes[:end-n]...)
-			probeNodes = b
-		} else {
-			probeNodes = probeNodes[off:end]
-		}
-		log.Printf("scheduler: probe batch %d/%d (cycle %d)", len(probeNodes), n, cycle)
+	if batch < 1 {
+		batch = 1
 	}
 
+	out := make(map[string]mihomo.Result, len(probeNodes))
 	if len(probeNodes) > 0 {
-		if err := s.engine.SyncNodes(probeNodes); err != nil {
-			log.Printf("scheduler: sync nodes: %v", err)
-		}
-		out, e := s.ProbeFn(cctx, probeNodes)
-		if e != nil {
-			return fmt.Errorf("scheduler: probe: %w", e)
+		n := len(probeNodes)
+		s.setStatus(func(st *Snapshot) {
+			st.ProbeTotal = n
+			st.ProbeDone = 0
+			st.AliveCount = 0
+			st.DeadCount = 0
+		})
+		for start := 0; start < n; start += batch {
+			if cctx.Err() != nil {
+				break // ponytail: clean bail on cycle cancellation
+			}
+			end := start + batch
+			if end > n {
+				end = n
+			}
+			w := probeNodes[start:end]
+			if err := s.engine.SyncNodes(w); err != nil {
+				log.Printf("scheduler: sync nodes: %v", err)
+			}
+			r, e := s.ProbeFn(cctx, w)
+			if e != nil {
+				return fmt.Errorf("scheduler: probe: %w", e)
+			}
+			for h, v := range r {
+				out[h] = v
+			}
+			s.setStatus(func(st *Snapshot) { st.ProbeDone = end })
 		}
 		// ponytail: re-resolve geo by the egress IP captured during the probe so
 		// the country reflects where traffic actually exits (not the possibly
