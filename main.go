@@ -45,6 +45,7 @@ type Config struct {
 	ExcludeCountries    []string // ISO codes excluded from subscriptions (e.g. ru,cn)
 	ExcludeProtocols    []string // schemes excluded from probing/subscriptions (e.g. vmess,trojan)
 	Workers             int      // probe worker-pool size (in-process mihomo concurrency); clamped [16,512], default 350
+	ProbeBatch          int      // probe batch size per cycle; caps node load into mihomo (0 -> 10×Workers); default 0 (auto = 10×Workers)
 	ProbeTimeoutMs      int      // per-URLTest timeout (ms); 0 = engine default 2000
 	MaxPingMs           int      // drop nodes slower than this (ms) from the served subscription; 0 disables
 	ReProbeCycles       int      // dead-node probe-skip window (cycles); 0 = probe all every cycle
@@ -103,6 +104,7 @@ func main() {
 		ExcludeCountries: cfg.ExcludeCountries,
 		ExcludeProtocols: cfg.ExcludeProtocols,
 		Workers:          cfg.Workers,
+		ProbeBatch:       cfg.ProbeBatch,
 		ProbeTimeoutMs:   cfg.ProbeTimeoutMs,
 		MaxPingMs:        cfg.MaxPingMs,
 		ReProbeCycles:       cfg.ReProbeCycles,
@@ -197,6 +199,7 @@ func parseFlags() (Config, string) {
 	excludeCountries := flag.String("exclude-countries", strings.Join(loaded.ExcludeCountries, ","), "comma-separated ISO country codes to exclude from subscriptions (e.g. ru,cn)")
 	excludeProtocols := flag.String("exclude-protocols", strings.Join(loaded.ExcludeProtocols, ","), "comma-separated schemes to exclude from probing/subscriptions (e.g. vmess,trojan)")
 	workers := flag.Int("workers", dfltInt(existed, loaded.Workers, 350), "probe worker-pool size (in-process mihomo concurrency); clamped [16,512], default 350")
+	probeBatch := flag.Int("probebatch", dfltInt(existed, loaded.ProbeBatch, 0), "probe batch size per cycle; caps node load into mihomo (0 -> 10×Workers); default 0 (auto = 10×Workers)")
 	probeTimeout := flag.Int("probe-timeout", dfltInt(existed, loaded.ProbeTimeoutMs, 2000), "probe timeout per URLTest in ms (default 2000)")
 	maxPing := flag.Int("max-ping", dfltInt(existed, loaded.MaxPingMs, 0), "drop nodes slower than this (ms) from the served subscription; 0 disables")
 	reprobe := flag.Int("reprobe", dfltInt(existed, loaded.ReProbeCycles, 6), "dead-node probe-skip window in cycles; 0 = probe all every cycle")
@@ -248,6 +251,7 @@ func parseFlags() (Config, string) {
 		ExcludeCountries:    excl,
 		ExcludeProtocols:    exclP,
 		Workers:             *workers,
+		ProbeBatch:          *probeBatch,
 		ProbeTimeoutMs:      *probeTimeout,
 		MaxPingMs:           *maxPing,
 		ReProbeCycles:       *reprobe,
@@ -383,6 +387,7 @@ func runInner(ctx context.Context, cfg Config, sch *scheduler.Scheduler, skipUI 
 		ExcludeCountries:    cfg.ExcludeCountries,
 		ExcludeProtocols:    cfg.ExcludeProtocols,
 		Workers:             cfg.Workers,
+		ProbeBatch:          cfg.ProbeBatch,
 		ProbeTimeoutMs:      cfg.ProbeTimeoutMs,
 		MaxPingMs:           cfg.MaxPingMs,
 		ReProbeCycles:       cfg.ReProbeCycles,

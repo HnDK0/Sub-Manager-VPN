@@ -36,6 +36,7 @@ type Settings struct {
 	ExcludeCountries    []string `json:"exclude_countries"`
 	ExcludeProtocols    []string `json:"exclude_protocols"`
 	Workers             int      `json:"workers"`
+	ProbeBatch          int      `json:"probe_batch"` // 0 = probe whole set; >0 caps per-cycle probe window
 	ProbeTimeoutMs      int      `json:"probe_timeout_ms"`
 	MaxPingMs           int      `json:"max_ping_ms"`
 	ReProbeCycles       int      `json:"reprobe_cycles"`        // dead-node skip window (cycles); 0 = probe all
@@ -63,6 +64,7 @@ func Default() Settings {
 		MinKeep:   1,
 
 		Workers:             350,
+		ProbeBatch:          0, // 0 = 10×Workers (auto); e.g. 5000 at Workers=500. Explicit -probebatch overrides.
 		ProbeTimeoutMs:      2000,
 		ReProbeCycles:       6,
 		DeadCycles:          84, // ~1 week at the 2h default interval

@@ -78,6 +78,12 @@ type Config struct {
 	// concurrent Latency/Speed calls inside the embedded mihomo engine.
 	// Clamped to [16, 512]; 0 defaults to 350. Bounded — never unbounded.
 	Workers int
+	// ProbeBatch caps how many nodes are probed per cycle. 0 disables the cap
+	// (probe the whole set at once). When a cycle's node set exceeds the cap, a
+	// deterministic rotating window is probed so the full set is eventually
+	// covered across cycles — this bounds memory/latency (thousands of concurrent
+	// mihomo probes would OOM/crash) for a 24/7 scheduler.
+	ProbeBatch int
 	// ProbeTimeoutMs bounds each URLTest (ms); 0 defaults to 2000 inside engine.
 	ProbeTimeoutMs int
 	// MaxPingMs drops nodes with latency above this from the subscription
@@ -883,6 +889,37 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 			}
 		}
 		probeNodes = append(probeNodes, n)
+	}
+
+	// Cap probe work per cycle so a huge node set can't OOM/crash the engine
+	// (thousands of concurrent mihomo probes). Coverage is eventually complete:
+	// a deterministic rotation walks the full set across cycles, fine for 24/7.
+	batch := s.cfg.ProbeBatch
+	if batch <= 0 {
+		// Auto: 10× the probe-worker count, so the worker pool is always fully
+		// utilized while per-cycle mihomo load stays bounded. Falls back to a
+		// fixed sane value if Workers is somehow unset.
+		if w := s.cfg.Workers; w > 0 {
+			batch = w * 10
+		} else {
+			batch = 3500
+		}
+	}
+	if len(probeNodes) > batch {
+		sort.Slice(probeNodes, func(i, j int) bool {
+			return nodeHash(&probeNodes[i]) < nodeHash(&probeNodes[j])
+		})
+		n := len(probeNodes)
+		off := (cycle * batch) % n
+		end := off + batch
+		if end > n {
+			b := append([]model.Node{}, probeNodes[off:]...)
+			b = append(b, probeNodes[:end-n]...)
+			probeNodes = b
+		} else {
+			probeNodes = probeNodes[off:end]
+		}
+		log.Printf("scheduler: probe batch %d/%d (cycle %d)", len(probeNodes), n, cycle)
 	}
 
 	if len(probeNodes) > 0 {

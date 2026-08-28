@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"vpn-sub-manager/internal/config"
@@ -185,6 +186,12 @@ func (f *Fetcher) fetchRawURL(ctx context.Context, rawURL string) ([]FetchedSour
 // downloads every candidate subscription file. It honors a /tree/<branch>/<path>
 // sub-path from the URL and recurses into directories, so a source can point at
 // a subdirectory (e.g. githubmirror/) instead of the whole repository.
+// fetchConcurrency bounds how many raw subscription files are downloaded in
+// parallel. Directory traversal (listContents) stays serial and cheap; only the
+// per-file HTTP GETs are parallelized — that is where large repos (hundreds of
+// files) bottleneck.
+const fetchConcurrency = 16
+
 func (f *Fetcher) fetchRepo(ctx context.Context, rawURL string) ([]FetchedSource, error) {
 	owner, repo, branch, subPath, err := parseRepoPath(rawURL)
 	if err != nil {
@@ -192,6 +199,7 @@ func (f *Fetcher) fetchRepo(ctx context.Context, rawURL string) ([]FetchedSource
 	}
 
 	var out []FetchedSource
+	var toFetch []string // raw URLs collected during BFS, downloaded in parallel at the end
 	seen := map[string]bool{}    // dedupe files by path
 	visited := map[string]bool{} // cycle guard for directories
 	queue := []string{subPath}
@@ -226,11 +234,43 @@ func (f *Fetcher) fetchRepo(ctx context.Context, rawURL string) ([]FetchedSource
 			if err := f.assertSafeHost(raw); err != nil {
 				return nil, err
 			}
-			body, err := f.fetchRaw(ctx, raw)
-			if err != nil {
-				return nil, err
+			toFetch = append(toFetch, raw)
+		}
+	}
+
+	if len(toFetch) > 0 {
+		var (
+			wg    sync.WaitGroup
+			mu    sync.Mutex
+			dlErr error
+		)
+		sem := make(chan struct{}, fetchConcurrency)
+		for _, raw := range toFetch {
+			if ctx.Err() != nil {
+				break
 			}
-			out = append(out, FetchedSource{URL: raw, Body: body})
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(raw string) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				body, err := f.fetchRaw(ctx, raw)
+				if err != nil {
+					mu.Lock()
+					if dlErr == nil {
+						dlErr = err
+					}
+					mu.Unlock()
+					return
+				}
+				mu.Lock()
+				out = append(out, FetchedSource{URL: raw, Body: body})
+				mu.Unlock()
+			}(raw)
+		}
+		wg.Wait()
+		if dlErr != nil {
+			return nil, dlErr
 		}
 	}
 	return out, nil
