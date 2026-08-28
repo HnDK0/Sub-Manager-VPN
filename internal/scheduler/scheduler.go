@@ -184,6 +184,7 @@ type Snapshot struct {
 	// Geo-phase progress, populated during the geo/upsert stage.
 	NodesGeoTotal int // nodes scheduled for geo resolution this cycle
 	NodesGeoDone  int // nodes whose geo resolution completed this cycle
+	GeoWorkers    int // geo resolution concurrency this cycle (cfg.Workers)
 }
 
 // engineNew and geoNew are the production constructors, kept as package-level
@@ -898,21 +899,51 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 		// dropped by the Alive gate at selection and never need a country. GeoFn
 		// falls back to the node Host when no egress IP was captured, so every
 		// alive node gets a correct Country for the exclude/sort at selection.
-		s.setStatus(func(st *Snapshot) { st.NodesGeoTotal = len(probeNodes) })
+		// GeoFn (DNS + mmdb) is the slow part, so resolution runs in a bounded
+		// pool of cfg.Workers goroutines; each touches a distinct index so there
+		// is no race on enrichedNodes. SQLite allows one writer, so the upsert is
+		// serialized via upsertMu (geo stays parallel).
+		aliveIdx := make([]int, 0, len(enrichedNodes))
 		for i := range enrichedNodes {
-			r, ok := out[enrichedNodes[i].hash]
-			if !ok || !r.Alive {
-				continue
+			if r, ok := out[enrichedNodes[i].hash]; ok && r.Alive {
+				aliveIdx = append(aliveIdx, i)
 			}
-			enrichedNodes[i].n.EgressIP = r.EgressIP
-			if cc := s.GeoFn(enrichedNodes[i].n); cc != "" {
-				enrichedNodes[i].country = cc
-				enrichedNodes[i].n.Country = cc
-				if err := s.st.UpsertNodeWithCountry(enrichedNodes[i].n, cc); err != nil {
-					log.Printf("scheduler: upsert egress country: %v", err)
+		}
+		s.setStatus(func(st *Snapshot) {
+			st.Phase = PhaseGeo
+			st.NodesGeoTotal = len(aliveIdx)
+			st.NodesGeoDone = 0
+			st.GeoWorkers = s.cfg.Workers
+		})
+		var geoWg sync.WaitGroup
+		sem := make(chan struct{}, s.cfg.Workers)
+		var upsertMu sync.Mutex
+		for _, i := range aliveIdx {
+			if cctx.Err() != nil {
+				break
+			}
+			geoWg.Add(1)
+			sem <- struct{}{}
+			go func(i int) {
+				defer geoWg.Done()
+				defer func() { <-sem }()
+				r := out[enrichedNodes[i].hash]
+				enrichedNodes[i].n.EgressIP = r.EgressIP
+				if cc := s.GeoFn(enrichedNodes[i].n); cc != "" {
+					enrichedNodes[i].country = cc
+					enrichedNodes[i].n.Country = cc
+					upsertMu.Lock()
+					if err := s.st.UpsertNodeWithCountry(enrichedNodes[i].n, cc); err != nil {
+						log.Printf("scheduler: upsert egress country: %v", err)
+					}
+					upsertMu.Unlock()
 				}
-			}
-			s.setStatus(func(st *Snapshot) { st.NodesGeoDone++ })
+				s.setStatus(func(st *Snapshot) { st.NodesGeoDone++ })
+			}(i)
+		}
+		geoWg.Wait()
+		if cctx.Err() != nil {
+			return nil // ponytail: clean bail on cycle cancellation
 		}
 	}
 
