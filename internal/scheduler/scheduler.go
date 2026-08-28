@@ -553,6 +553,13 @@ func sourceMetaFrom(fetched []fetch.FetchedSource) state.SourceMeta {
 	}
 }
 
+// defaultProbeHardTimeout bounds a single node's Probe so a wedged dial
+// (engine.Probe ignoring ctx for UDP/QUIC schemes like Hysteria2/TUIC) cannot
+// stall wg.Wait() and freeze the whole cycle at "N/M". 30s is well above the
+// engine's own ~2s URLTest budget; a node that hits this is simply dropped this
+// cycle and recovered next. ponytail: real fix is making engine.Probe honor ctx.
+const defaultProbeHardTimeout = 30 * time.Second
+
 // defaultProbe probes every node through the engine and returns results keyed
 // by node hash.
 func (s *Scheduler) defaultProbe(ctx context.Context, nodes []model.Node) (map[string]mihomo.Result, error) {
@@ -574,10 +581,38 @@ func (s *Scheduler) defaultProbe(ctx context.Context, nodes []model.Node) (map[s
 	for _, n := range nodes {
 		wg.Add(1)
 		sem <- struct{}{}
+		// Per-probe hard ceiling: engine.Probe relies on an internal context
+		// timeout, but for some node schemes (UDP/QUIC like Hysteria2/TUIC) the
+		// underlying dial can ignore the context and block until the cycle is
+		// cancelled — which freezes wg.Wait() and the whole cycle at "N/M". Bound
+		// each probe so a single unresponsive node can never stall the batch.
+		pctx, pcancel := context.WithTimeout(ctx, defaultProbeHardTimeout)
 		go func(n model.Node) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			r, err := s.engine.Probe(ctx, n)
+			defer pcancel()
+			type probeOutcome struct {
+				r   mihomo.Result
+				err error
+			}
+			resCh := make(chan probeOutcome, 1)
+			go func() {
+				r, err := s.engine.Probe(pctx, n)
+				resCh <- probeOutcome{r, err}
+			}()
+			var r mihomo.Result
+			var err error
+			select {
+			case o := <-resCh:
+				r, err = o.r, o.err
+			case <-pctx.Done():
+				// Engine.Probe did not return within the bound (wedged dial
+				// ignoring ctx). Drop this node this cycle; it is recovered next
+				// cycle. The inner goroutine is abandoned — ponytail: real fix is
+				// making engine.Probe honor ctx for Hysteria2/TUIC.
+				log.Printf("scheduler: probe hard-timeout for %s after %s; dropped this cycle", nodeHash(&n), defaultProbeHardTimeout)
+				return
+			}
 			if err != nil {
 				// Infra failure (pool down): drop this node this cycle instead
 				// of stalling the whole batch. ponytail: next cycle recovers it.
