@@ -45,8 +45,9 @@ type sbUTLS struct {
 }
 
 type sbReality struct {
-	PublicKey string `json:"public_key"`
-	ShortID   string `json:"short_id"`
+	Enabled    bool   `json:"enabled"`
+	PublicKey  string `json:"public_key"`
+	ShortID    string `json:"short_id"`
 }
 
 // sbTransport carries the per-network transport block (ws/grpc).
@@ -181,7 +182,7 @@ func sbTLSBlock(n model.Node, reality bool) *sbTLS {
 	}
 	if reality {
 		t.UTLS = &sbUTLS{Fingerprint: firstNonEmpty(n.Extra["fp"], "chrome")}
-		t.Reality = &sbReality{PublicKey: n.Extra["pbk"], ShortID: n.Extra["sid"]}
+		t.Reality = &sbReality{Enabled: true, PublicKey: n.Extra["pbk"], ShortID: n.Extra["sid"]}
 	}
 	return t
 }

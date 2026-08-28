@@ -81,9 +81,8 @@ func buildProxyYAML(n model.Node) map[string]any {
 			if sid := extra(n, "sid"); sid != "" {
 				ro["short-id"] = sid
 			}
-			if spx := extra(n, "spx"); spx != "" {
-				ro["spider-x"] = spx
-			}
+			// ponytail: mihomo RealityOptions has only public-key/short-id
+			// (no spider-x); emitting it is dead config, so we don't.
 			base["reality-opts"] = ro
 			// xray/sing-box default client-fingerprint to chrome; match it so
 			// the probe exercises the same TLS fingerprint the client will use.

@@ -1044,10 +1044,17 @@ func (s *Scheduler) regenerateSubs() error {
 		if s.cfg.IsBanned != nil && s.cfg.IsBanned(h) {
 			continue
 		}
-		// Use the latest stored latency for ordering/labels when available.
+		// ponytail: never emit a node whose latest probe is dead. reconcile()
+		// already prunes dead members, but skips the prune when this cycle's
+		// selection is empty (MinKeep) — without this gate a stale dead member
+		// would otherwise be served to the client. Nodes with no stored result
+		// are kept (cannot prove them dead).
 		lat := 0
 		if id, e := s.st.NodeID(h); e == nil {
 			if r, e2 := s.st.LatestResult(id); e2 == nil {
+				if !r.Alive {
+					continue
+				}
 				lat = r.LatencyMs
 			}
 		}

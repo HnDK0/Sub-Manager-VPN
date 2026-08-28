@@ -94,13 +94,14 @@ func simpleURI(n model.Node, name string) string {
 		if n.Flow != "" {
 			q.Set("flow", n.Flow)
 		}
-		// reality carries pbk/sid/fp/sni/spx; plain tls carries sni/fp/alpn.
+		// reality carries pbk/sid/fp/sni; plain tls carries sni/fp/alpn.
+		// spider-x (spx) is intentionally NOT emitted: it is a mihomo-only
+		// reality field that v2rayN/xray/sing-box never serialize (matches Throne).
 		if n.Security == "reality" {
 			addIf(q, "pbk", n.Extra["pbk"])
 			addIf(q, "fp", n.Extra["fp"])
 			addIf(q, "sid", n.Extra["sid"])
 			addIf(q, "sni", n.Extra["sni"])
-			addIf(q, "spx", n.Extra["spx"])
 		} else {
 			addIf(q, "sni", n.Extra["sni"])
 			addIf(q, "fp", n.Extra["fp"])
