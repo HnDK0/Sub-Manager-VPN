@@ -951,6 +951,10 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 	probeNodes := make([]model.Node, 0, len(nodes))
 	skippedReProbe := 0
 	skippedReProbeMin := s.cfg.ReProbeCycles
+	// Recovery valve: nodes the dead-node window would skip are collected here so
+	// that, if the window would skip EVERY candidate, we can re-probe them instead
+	// of producing a permanent empty subscription.
+	skippedNodes := make([]model.Node, 0, len(nodes))
 	for _, n := range nodes {
 		if exclude[strings.ToUpper(n.Country)] || skipProto[strings.ToLower(string(n.Protocol))] {
 			continue
@@ -970,11 +974,21 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 						skippedReProbeMin = rem
 					}
 					skippedReProbe++
+					skippedNodes = append(skippedNodes, n)
 					continue
 				}
 			}
 		}
 		probeNodes = append(probeNodes, n)
+	}
+	// Recovery valve: a dead-node window that skips ALL candidates means probing
+	// nothing, which can leave the subscription empty for many cycles after a
+	// mass-death event (e.g. a previously broken engine marking every node dead).
+	// Re-probe the skipped set so the pipeline can recover; SyncNodes is windowed,
+	// so even a full re-probe is memory-bounded.
+	if len(probeNodes) == 0 && len(skippedNodes) > 0 {
+		probeNodes = append(probeNodes, skippedNodes...)
+		log.Printf("scheduler: cycle %d: ReProbeCycles dead-node window would skip all %d candidates; re-probing to allow recovery", cycle, len(probeNodes))
 	}
 
 	// FIX 6: a cycle that skips EVERY candidate via the ReProbeCycles dead-node
