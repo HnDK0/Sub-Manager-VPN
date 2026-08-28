@@ -933,24 +933,30 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 		st.NodesGeoTotal = 0
 		st.NodesGeoDone = 0
 	})
-	type enriched struct {
-		n       model.Node
-		country string
-		hash    string
-	}
-	var enrichedNodes []enriched
+	// ponytail: keep a SINGLE materialized copy of the nodes (in `nodes`) plus
+	// index-aligned slices for geo results. The old code kept a SECOND full
+	// by-value copy of every node (`enrichedNodes`) — at 80k nodes with the
+	// heavy Raw field that doubled peak memory and OOM-killed the process. Geo
+	// now writes back into `nodes[i]` directly.
+	countries := make([]string, len(nodes))
+	hashes := make([]string, len(nodes))
 	for i := range nodes {
 		if cctx.Err() != nil {
 			break
 		}
 		n := nodes[i]
-		hash := nodeHash(&n)
+		h := nodeHash(&n)
 		// ponytail: cheap upsert — writes the node to state with no geo. SQLite
 		// allows one writer, so this is the only DB write in this loop.
 		if err := s.st.UpsertNode(&n, cycle); err != nil {
 			return fmt.Errorf("scheduler: upsert node: %w", err)
 		}
-		enrichedNodes = append(enrichedNodes, enriched{n: n, country: "", hash: hash})
+		hashes[i] = h
+		// Raw is only needed by the parse/upsert path; the DB does not store it
+		// and probe/geo/select never read it. Clear it now so the heavy original
+		// URI strings are freed before probeNodes copies the node (and before
+		// they sit in `nodes` for the rest of the cycle).
+		nodes[i].Raw = ""
 	}
 	s.setStatus(func(st *Snapshot) { st.NodesUpserted = len(nodes) })
 
@@ -970,7 +976,7 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 		}
 	}
 
-	// Probe batch: skip excluded countries/protocols. enrichedNodes still
+	// Probe batch: skip excluded countries/protocols. nodes still
 	// derives from the full node set (for upsert/history), but results are only
 	// produced for the filtered slice, so skipped nodes never reach selection.
 	s.setStatus(func(st *Snapshot) { st.Phase = PhaseProbe })
@@ -1098,11 +1104,11 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 		// alive node gets a correct Country for the exclude/sort at selection.
 		// GeoFn (DNS + mmdb) is the slow part, so resolution runs in a bounded
 		// pool of cfg.Workers goroutines; each touches a distinct index so there
-		// is no race on enrichedNodes. SQLite allows one writer, so the upsert is
+		// is no race on nodes. SQLite allows one writer, so the upsert is
 		// serialized via upsertMu (geo stays parallel).
-		aliveIdx := make([]int, 0, len(enrichedNodes))
-		for i := range enrichedNodes {
-			if r, ok := out[enrichedNodes[i].hash]; ok && r.Alive {
+		aliveIdx := make([]int, 0, len(nodes))
+		for i := range nodes {
+			if r, ok := out[hashes[i]]; ok && r.Alive {
 				aliveIdx = append(aliveIdx, i)
 			}
 		}
@@ -1137,17 +1143,17 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 					if cctx.Err() != nil {
 						return
 					}
-					r := out[enrichedNodes[i].hash]
-					enrichedNodes[i].n.EgressIP = r.EgressIP
-					if cc := s.GeoFn(enrichedNodes[i].n); cc != "" {
-						enrichedNodes[i].country = cc
-						enrichedNodes[i].n.Country = cc
-						upsertMu.Lock()
-						if err := s.st.UpsertNodeWithCountry(enrichedNodes[i].n, cc); err != nil {
-							log.Printf("scheduler: upsert egress country: %v", err)
-						}
-						upsertMu.Unlock()
+				r := out[hashes[i]]
+				nodes[i].EgressIP = r.EgressIP
+				if cc := s.GeoFn(nodes[i]); cc != "" {
+					countries[i] = cc
+					nodes[i].Country = cc
+					upsertMu.Lock()
+					if err := s.st.UpsertNodeWithCountry(nodes[i], cc); err != nil {
+						log.Printf("scheduler: upsert egress country: %v", err)
 					}
+					upsertMu.Unlock()
+				}
 					s.setStatus(func(st *Snapshot) { st.NodesGeoDone++ })
 				}
 			}()
@@ -1190,14 +1196,14 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 	// blip can't silently drop it from the subscription.
 	var cands []selector.Candidate
 	floorKbps := s.cfg.MinSpeedMbps * 1000
-	for _, en := range enrichedNodes {
-		if s.cfg.IsBanned != nil && s.cfg.IsBanned(en.hash) {
+	for i := range nodes {
+		if s.cfg.IsBanned != nil && s.cfg.IsBanned(hashes[i]) {
 			continue
 		}
-		if exclude[strings.ToUpper(en.country)] {
+		if exclude[strings.ToUpper(countries[i])] {
 			continue
 		}
-		id, e := s.st.NodeID(en.hash)
+		id, e := s.st.NodeID(hashes[i])
 		if e != nil {
 			continue
 		}
@@ -1209,9 +1215,9 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 			continue
 		}
 		cands = append(cands, selector.Candidate{
-			Node:      en.n,
+			Node:      nodes[i],
 			LatencyMs: lr.LatencyMs,
-			Country:   en.country,
+			Country:   countries[i],
 		})
 	}
 
