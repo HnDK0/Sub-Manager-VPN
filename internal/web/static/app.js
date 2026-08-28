@@ -812,6 +812,7 @@ const SETTINGS_FIELDS = [
   { key: "minkeep", label: "Min Keep", type: "number", note: "minimum subscription versions kept" },
   { key: "dead_cycles", label: "Corpse Cycles", type: "number", note: "consecutive dead cycles before skipping (0 = disabled)" },
   { key: "workers", label: "Workers", type: "number", note: "concurrent probe goroutines for the embedded mihomo engine (default 32)" },
+  { key: "probe_batch", label: "Probe Batch", type: "number", note: "0 = auto (10×Workers); >0 = per-cycle probe window size (mihomo memory bound). RESTART required to take effect." },
   { key: "max_ping_ms", label: "Max Ping (ms)", type: "number", note: "drop nodes slower than this from the served subscription (0 = no cap)" },
   { key: "probe_url", label: "Probe URL", type: "text", note: "URL used for latency/delay checks (e.g. http://www.gstatic.com/generate_204)" },
   { key: "speed_test_url", label: "Speed Test URL", type: "text", note: "URL used for manual speed tests (large download)" },
