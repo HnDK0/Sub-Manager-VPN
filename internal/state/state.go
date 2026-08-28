@@ -53,20 +53,31 @@ type NodeRow struct {
 // particular pruning entirely.
 type Retention struct {
 	HistoryDays   int // drop results older than this many days (per node)
-	HistoryCycles int // keep at most this many history samples per node
+	HistoryCycles int // keep at most this many history/results samples per node
 	NodeTTLCycles int // delete nodes unseen for this many cycles
 	DeadCycles    int // prune nodes with no alive result within this many cycles (cycle-delta from last alive)
 }
 
-// DefaultRetention returns the project-default retention window.
+// DefaultRetention returns the project-default retention window. Every window is
+// non-zero so Prune actually bounds the DB under 24/7 operation; a caller may
+// still pass 0 to disable any individual prune. Values are conservative:
+//   - HistoryCycles 200: keeps ~200 cycles of liveness samples per node — far
+//     more than CorpseCycles(5), so the history-based corpse skip is never
+//     starved of data.
+//   - NodeTTLCycles 30: a node not seen in 30 cycles (~15h at the 30m default
+//     interval) is gone from its source and safe to drop.
+//   - DeadCycles 84: a node with no alive result in 84 cycles (~42h at 30m, ~1
+//     week at the 2h default interval) is pruned. This is well above
+//     CorpseCycles(5) — we never delete a node the scheduler still intends to
+//     skip-reprobe — and below HistoryCycles(200) so Validate() won't clamp it.
+//     Re-parsing a source re-upserts the same hash, so dropping the corpse row is
+//     functionally identical to keeping it (only added_at resets).
 func DefaultRetention() Retention {
 	return Retention{
 		HistoryDays:   30,
 		HistoryCycles: 200,
 		NodeTTLCycles: 30,
-		// DeadCycles: 0 — keep corpses in the DB so re-parsing a source upserts
-		// the same hash instead of re-adding it as a fresh node (operator request).
-		DeadCycles: 0,
+		DeadCycles:    84,
 	}
 }
 
@@ -673,7 +684,28 @@ func (s *State) Prune(cfg Retention, currentCycle int) error {
 		}
 	}
 
-	// 2. Keep only the last HistoryCycles history rows per node.
+	// 2. Keep only the last HistoryCycles results per node. This is the dominant
+	// growth source: every live node accrues one results row per cycle, so
+	// without this the table reaches HistoryCycles * node_count (~17M rows at
+	// 86k nodes) and never shrinks. Pruning it here — every cycle, since Prune is
+	// already called once per scheduler cycle — bounds results at
+	// HistoryCycles * node_count regardless of how long the process runs. The
+	// window is partitioned on node_id, which idx_results_node covers, so it
+	// streams partitions instead of sorting the whole table.
+	if cfg.HistoryCycles != 0 {
+		if _, err := s.db.Exec(`
+			DELETE FROM results WHERE rowid IN (
+				SELECT rowid FROM (
+					SELECT rowid,
+					       row_number() OVER (PARTITION BY node_id ORDER BY cycle_id DESC, checked_at DESC) AS rn
+					FROM results
+				) WHERE rn > ?
+			)`, cfg.HistoryCycles); err != nil {
+			return fmt.Errorf("prune results by cycles: %w", err)
+		}
+	}
+
+	// 3. Keep only the last HistoryCycles history rows per node.
 	if cfg.HistoryCycles != 0 {
 		if _, err := s.db.Exec(`
 			DELETE FROM history WHERE rowid IN (
@@ -687,7 +719,7 @@ func (s *State) Prune(cfg Retention, currentCycle int) error {
 		}
 	}
 
-	// 3. Delete nodes past their TTL.
+	// 4. Delete nodes past their TTL.
 	if cfg.NodeTTLCycles != 0 {
 		if _, err := s.db.Exec(
 			`DELETE FROM nodes WHERE ? - last_seen_cycle > ?`, currentCycle, cfg.NodeTTLCycles,
@@ -696,7 +728,9 @@ func (s *State) Prune(cfg Retention, currentCycle int) error {
 		}
 	}
 
-	// 4. Delete nodes with no alive result within DeadCycles cycles (cycle-delta).
+	// 5. Delete nodes with no alive result within DeadCycles cycles (cycle-delta).
+	// deadNodeIDs uses idx_results_node (indexed) and only reads, so this is safe
+	// under WAL; the per-node deletes below hit the primary key / node_id indexes.
 	if cfg.DeadCycles != 0 {
 		ids, err := s.deadNodeIDs(cfg.DeadCycles, currentCycle)
 		if err != nil {

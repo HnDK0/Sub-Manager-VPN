@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"vpn-sub-manager/internal/config"
@@ -111,6 +112,12 @@ type Config struct {
 	// selection (so it never reaches a subscription). Nil disables banning.
 	IsBanned func(hash string) bool
 }
+
+// maxParseCacheNodes bounds parseCache residency. When the total cached node
+// count exceeds this, the least-recently-used source parses are evicted (FIFO by
+// last use) so 24/7 operation with huge source sets cannot pin 86k+ nodes in
+// memory forever. Parse behavior/keys are unchanged — only eviction bounds it.
+const maxParseCacheNodes = 50000
 
 // ProbeEngine is the subset of the embedded mihomo engine the scheduler depends
 // on. It is an interface (not the concrete type) so tests can supply a fake
@@ -246,11 +253,25 @@ type Scheduler struct {
 	status   Snapshot
 	cycleReq chan struct{}
 
+	// syncMu guards every engine.SyncNodes call so the main probe cycle and the
+	// SubValidity/SubPing timers can never replace the controller's node set
+	// concurrently (which made main-cycle probes fall through to EnsureNode and
+	// hang at 86k nodes). probeBusy marks the main cycle's probe phase so the
+	// timers skip rather than block on syncMu for minutes at a time.
+	syncMu    sync.Mutex
+	probeBusy atomic.Bool
+
 	// parseCache holds the last parsed nodes per source URL so an unchanged
 	// source (304 or identical body hash) is reused without re-parsing. It is
 	// in-memory only: on a cold start we re-fetch once and repopulate it.
-	cacheMu    sync.Mutex
-	parseCache map[string][]model.Node
+	// It is bounded: when the total cached node count exceeds
+	// maxParseCacheNodes the least-recently-used source parses are evicted
+	// (FIFO by last use) so 24/7 operation with huge source sets cannot pin
+	// 86k+ nodes in memory forever. Keys/parse behavior are unchanged.
+	cacheMu        sync.Mutex
+	parseCache     map[string][]model.Node
+	parseCacheLRU  []string // front = least-recently-used
+	parseCacheSize int      // total nodes across all entries
 }
 
 // New builds a Scheduler: it opens state, creates the embedded mihomo engine,
@@ -455,19 +476,62 @@ func (s *Scheduler) parseFetched(fetched []fetch.FetchedSource) []model.Node {
 	return nodes
 }
 
-// cachedNodes returns the cached parse for url, if present.
+// cachedNodes returns the cached parse for url, if present. A hit moves the
+// entry to the most-recently-used end so eviction (by total node count) drops
+// the least-recently-used sources first.
 func (s *Scheduler) cachedNodes(url string) ([]model.Node, bool) {
 	s.cacheMu.Lock()
 	defer s.cacheMu.Unlock()
 	n, ok := s.parseCache[url]
+	if ok {
+		s.touchCacheLRU(url)
+	}
 	return n, ok
 }
 
-// setCache stores the parsed nodes for url.
+// setCache stores the parsed nodes for url, evicting least-recently-used entries
+// (FIFO by last use) when the total cached node count exceeds maxParseCacheNodes.
 func (s *Scheduler) setCache(url string, nodes []model.Node) {
 	s.cacheMu.Lock()
+	defer s.cacheMu.Unlock()
+	// Remove any prior entry for this url before re-inserting.
+	if old, ok := s.parseCache[url]; ok {
+		s.parseCacheSize -= len(old)
+		s.removeCacheLRU(url)
+	}
 	s.parseCache[url] = nodes
-	s.cacheMu.Unlock()
+	s.parseCacheSize += len(nodes)
+	s.parseCacheLRU = append(s.parseCacheLRU, url)
+	// Evict oldest entries until under the cap (always keep at least this entry).
+	for s.parseCacheSize > maxParseCacheNodes && len(s.parseCacheLRU) > 1 {
+		oldURL := s.parseCacheLRU[0]
+		s.parseCacheLRU = s.parseCacheLRU[1:]
+		if old, ok := s.parseCache[oldURL]; ok {
+			s.parseCacheSize -= len(old)
+			delete(s.parseCache, oldURL)
+		}
+	}
+}
+
+// touchCacheLRU moves url to the most-recently-used end.
+func (s *Scheduler) touchCacheLRU(url string) {
+	for i, u := range s.parseCacheLRU {
+		if u == url {
+			s.parseCacheLRU = append(s.parseCacheLRU[:i], s.parseCacheLRU[i+1:]...)
+			s.parseCacheLRU = append(s.parseCacheLRU, url)
+			return
+		}
+	}
+}
+
+// removeCacheLRU drops url from the LRU ordering (does not delete the value).
+func (s *Scheduler) removeCacheLRU(url string) {
+	for i, u := range s.parseCacheLRU {
+		if u == url {
+			s.parseCacheLRU = append(s.parseCacheLRU[:i], s.parseCacheLRU[i+1:]...)
+			return
+		}
+	}
 }
 
 // shaHex returns the hex SHA-256 of b.
@@ -529,6 +593,7 @@ func (s *Scheduler) defaultProbe(ctx context.Context, nodes []model.Node) (map[s
 			out[nodeHash(&n)] = r
 			mu.Unlock()
 			s.setStatus(func(st *Snapshot) {
+				st.ProbeDone++
 				if r.Alive {
 					st.AliveCount++
 				} else {
@@ -584,11 +649,19 @@ func (s *Scheduler) ProbeNodes(ctx context.Context, nodes []model.Node) (map[str
 
 // SyncNodes loads the given nodes into the embedded probe engine so they can be
 // probed. Exposed for the web manual-test path (handleTestNodes), which probes
-// arbitrary DB nodes that may not be in the engine's last cycle sync.
+// arbitrary DB nodes that may not be in the engine's last cycle sync. It guards
+// the engine-sync lock (FIX 3) and skips if the main probe cycle is active so a
+// manual test cannot corrupt an in-flight window.
 func (s *Scheduler) SyncNodes(nodes []model.Node) error {
 	if s.engine == nil {
 		return nil
 	}
+	if s.probeBusy.Load() {
+		log.Printf("scheduler: manual SyncNodes skipped: main probe cycle active")
+		return nil
+	}
+	s.syncMu.Lock()
+	defer s.syncMu.Unlock()
 	return s.engine.SyncNodes(nodes)
 }
 
@@ -610,8 +683,11 @@ func (s *Scheduler) Run(ctx context.Context) error {
 	// and rebuild out/ from the persisted subscription table on EVERY start, so a
 	// restart does not lose progress (valid nodes / served files). Runs before the
 	// grace-skip below because the in-memory engine and out/ are lost on restart.
+	// FIX 2: window the sync so all 86k nodes are never marshaled into one config
+	// at once (OOM). At boot no other goroutine touches the engine yet, so no
+	// syncMu guard is needed here.
 	if all, err := s.fullUnion(nil); err == nil && len(all) > 0 {
-		if err := s.engine.SyncNodes(all); err != nil {
+		if err := s.syncNodesWindowed(all); err != nil {
 			log.Printf("scheduler: boot sync nodes: %v", err)
 		}
 	}
@@ -873,6 +949,8 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 	// present and skips EnsureNode (which would otherwise reload config under the
 	// write lock, serializing the pool back to ~1-by-1).
 	probeNodes := make([]model.Node, 0, len(nodes))
+	skippedReProbe := 0
+	skippedReProbeMin := s.cfg.ReProbeCycles
 	for _, n := range nodes {
 		if exclude[strings.ToUpper(n.Country)] || skipProto[strings.ToLower(string(n.Protocol))] {
 			continue
@@ -884,11 +962,27 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 			if id, e := s.st.NodeID(nodeHash(&n)); e == nil {
 				if lr, e2 := s.st.LatestResult(id); e2 == nil && !lr.Alive &&
 					cycle >= lr.CycleID && cycle-lr.CycleID < s.cfg.ReProbeCycles {
+					// FIX 6: count nodes skipped by the dead-node window so a
+					// fully-skipped cycle is explainable instead of a silent
+					// "0 pings".
+					rem := s.cfg.ReProbeCycles - (cycle - lr.CycleID)
+					if rem < skippedReProbeMin {
+						skippedReProbeMin = rem
+					}
+					skippedReProbe++
 					continue
 				}
 			}
 		}
 		probeNodes = append(probeNodes, n)
+	}
+
+	// FIX 6: a cycle that skips EVERY candidate via the ReProbeCycles dead-node
+	// window would otherwise show "0 pings" with no explanation. Log it so the
+	// silent-empty-cycle case is diagnosable.
+	if skippedReProbe > 0 && len(probeNodes) == 0 {
+		log.Printf("scheduler: cycle %d: 0 nodes probed — %d candidate(s) skipped by ReProbeCycles dead-node window; ~%d cycle(s) remaining before re-probe",
+			cycle, skippedReProbe, skippedReProbeMin)
 	}
 
 	// Probe the WHOLE candidate set every cycle, but in bounded windows so mihomo
@@ -918,6 +1012,11 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 			st.AliveCount = 0
 			st.DeadCount = 0
 		})
+		// FIX 3: mark the probe phase busy so SubValidity/SubPing skip their own
+		// SyncNodes instead of racing the main cycle and corrupting the engine's
+		// node set (which forced main-cycle probes through EnsureNode → hang).
+		s.probeBusy.Store(true)
+		defer s.probeBusy.Store(false)
 		for start := 0; start < n; start += batch {
 			if cctx.Err() != nil {
 				break // ponytail: clean bail on cycle cancellation
@@ -927,17 +1026,20 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 				end = n
 			}
 			w := probeNodes[start:end]
+			// FIX 3: hold the engine-sync lock across SyncNodes + ProbeFn so no
+			// other goroutine can replace the controller node set mid-window.
+			s.syncMu.Lock()
 			if err := s.engine.SyncNodes(w); err != nil {
 				log.Printf("scheduler: sync nodes: %v", err)
 			}
 			r, e := s.ProbeFn(cctx, w)
+			s.syncMu.Unlock()
 			if e != nil {
 				return fmt.Errorf("scheduler: probe: %w", e)
 			}
 			for h, v := range r {
 				out[h] = v
 			}
-			s.setStatus(func(st *Snapshot) { st.ProbeDone = end })
 		}
 		// ponytail: re-resolve geo by the egress IP captured during the probe so
 		// the country reflects where traffic actually exits (not the possibly
@@ -969,30 +1071,37 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 			st.GeoWorkers = geoConc
 		})
 		var geoWg sync.WaitGroup
-		sem := make(chan struct{}, geoConc)
 		var upsertMu sync.Mutex
+		// FIX 4: reuse the bounded worker-pool pattern instead of spawning one
+		// goroutine per alive node (up to 86k goroutines → stack OOM). A fixed
+		// pool of geoConc workers drains the alive-index channel.
+		idxCh := make(chan int, len(aliveIdx))
 		for _, i := range aliveIdx {
-			if cctx.Err() != nil {
-				break
-			}
+			idxCh <- i
+		}
+		close(idxCh)
+		for w := 0; w < geoConc; w++ {
 			geoWg.Add(1)
-			sem <- struct{}{}
-			go func(i int) {
+			go func() {
 				defer geoWg.Done()
-				defer func() { <-sem }()
-				r := out[enrichedNodes[i].hash]
-				enrichedNodes[i].n.EgressIP = r.EgressIP
-				if cc := s.GeoFn(enrichedNodes[i].n); cc != "" {
-					enrichedNodes[i].country = cc
-					enrichedNodes[i].n.Country = cc
-					upsertMu.Lock()
-					if err := s.st.UpsertNodeWithCountry(enrichedNodes[i].n, cc); err != nil {
-						log.Printf("scheduler: upsert egress country: %v", err)
+				for i := range idxCh {
+					if cctx.Err() != nil {
+						return
 					}
-					upsertMu.Unlock()
+					r := out[enrichedNodes[i].hash]
+					enrichedNodes[i].n.EgressIP = r.EgressIP
+					if cc := s.GeoFn(enrichedNodes[i].n); cc != "" {
+						enrichedNodes[i].country = cc
+						enrichedNodes[i].n.Country = cc
+						upsertMu.Lock()
+						if err := s.st.UpsertNodeWithCountry(enrichedNodes[i].n, cc); err != nil {
+							log.Printf("scheduler: upsert egress country: %v", err)
+						}
+						upsertMu.Unlock()
+					}
+					s.setStatus(func(st *Snapshot) { st.NodesGeoDone++ })
 				}
-				s.setStatus(func(st *Snapshot) { st.NodesGeoDone++ })
-			}(i)
+			}()
 		}
 		geoWg.Wait()
 		if cctx.Err() != nil {
@@ -1292,9 +1401,17 @@ func (s *Scheduler) SubValidity(ctx context.Context) error {
 	for i, it := range items {
 		nodes[i] = it.node
 	}
+	// FIX 3: skip entirely if the main probe cycle is mid-window — its SyncNodes
+	// is guarded by syncMu and would otherwise race/corrupt the engine set.
+	if s.probeBusy.Load() {
+		log.Printf("scheduler: sub-validity skipped: main probe cycle active")
+		return nil
+	}
+	s.syncMu.Lock()
 	if err := s.engine.SyncNodes(nodes); err != nil {
 		log.Printf("scheduler: subvalidity sync nodes: %v", err)
 	}
+	s.syncMu.Unlock()
 	workers := s.cfg.Workers
 	if workers <= 0 {
 		workers = 32
@@ -1392,9 +1509,16 @@ func (s *Scheduler) SubPing(ctx context.Context) error {
 	for i, it := range items {
 		nodes[i] = it.node
 	}
+	// FIX 3: skip if the main probe cycle is active (see SubValidity).
+	if s.probeBusy.Load() {
+		log.Printf("scheduler: sub-ping skipped: main probe cycle active")
+		return nil
+	}
+	s.syncMu.Lock()
 	if err := s.engine.SyncNodes(nodes); err != nil {
 		log.Printf("scheduler: subping sync nodes: %v", err)
 	}
+	s.syncMu.Unlock()
 	workers := s.cfg.Workers
 	if workers <= 0 {
 		workers = 32
@@ -1485,13 +1609,22 @@ func (s *Scheduler) ReplaceRoutine(deadHash string) error {
 	}
 
 	// Build the FULL union: common alive ∪ subscription members ∪ candidates,
-	// so SyncNodes never drops a subscription member or other proxy.
+	// so SyncNodes never drops a subscription member or other proxy. Candidates
+	// are appended last (see fullUnion) so they land in the final window and
+	// stay loaded for the probe below.
 	union, err := s.fullUnion(cands)
 	if err != nil {
 		return fmt.Errorf("full union: %w", err)
 	}
-	if err := s.engine.SyncNodes(union); err != nil {
-		return fmt.Errorf("sync nodes: %w", err)
+	// FIX 2 + FIX 3: sync the union in bounded windows (never all 86k at once →
+	// OOM) and hold syncMu so no concurrent cycle/timer can corrupt the set
+	// mid-sync. ReplaceRoutine is only reached from SubValidity's post-processing
+	// (which has released syncMu), so this cannot deadlock. The lock is held for
+	// the whole sync+probe so the candidate probe below always sees its nodes.
+	s.syncMu.Lock()
+	defer s.syncMu.Unlock()
+	if err := s.syncNodesWindowed(union); err != nil {
+		log.Printf("scheduler: replace routine windowed sync: %v", err)
 	}
 
 	// Fresh-ping each candidate; swap the first alive in.
@@ -1518,6 +1651,43 @@ func (s *Scheduler) ReplaceRoutine(deadHash string) error {
 	// None alive: drop the dead member so it is excluded from output.
 	_ = s.st.RemoveSubscription(deadHash)
 	return s.regenerateSubs()
+}
+
+// syncNodesWindowed loads nodes into the engine in bounded windows so the
+// embedded mihomo hub never has to marshal/hold the entire (86k+) node set in
+// one config reload (which OOMs/crashes). Each window replaces the engine set,
+// so callers must probe the window's nodes immediately after — mirroring the
+// main cycle. It does NOT take syncMu; the caller is responsible for guarding
+// concurrent SyncNodes calls.
+func (s *Scheduler) syncNodesWindowed(nodes []model.Node) error {
+	if len(nodes) == 0 {
+		return nil
+	}
+	batch := s.cfg.ProbeBatch
+	if batch <= 0 {
+		if w := s.cfg.Workers; w > 0 {
+			batch = w * 10 // 10× workers: user-confirmed "5-10k processes fine at once"
+		} else {
+			batch = 3500
+		}
+	}
+	if batch < 1 {
+		batch = 1
+	}
+	var firstErr error
+	for start := 0; start < len(nodes); start += batch {
+		end := start + batch
+		if end > len(nodes) {
+			end = len(nodes)
+		}
+		if err := s.engine.SyncNodes(nodes[start:end]); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			log.Printf("scheduler: windowed sync nodes: %v", err)
+		}
+	}
+	return firstErr
 }
 
 // fullUnion returns the complete node set to hand to SyncNodes: every common

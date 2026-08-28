@@ -139,7 +139,7 @@ function renderStatus(d) {
   const probeBar = d.phase === 'probe' ? prog('проверено', d.probeDone, d.probeTotal) : '';
   const geoLabel = 'geo · ' + (d.geoWorkers != null ? d.geoWorkers : '?') + ' потоков';
   const geoBar = d.phase === 'geo/upsert' ? prog(geoLabel, d.nodesGeoDone, d.nodesGeoTotal) : '';
-  const liveStats = d.phase === 'probe' ? `<div class="muted" style="margin-top:2px">Valid: ${d.aliveCount != null ? d.aliveCount : 0}${d.probeDone != null && d.aliveCount != null ? ' · Dropped: ' + (d.probeDone - d.aliveCount) : ''}</div>` : '';
+  const liveStats = d.phase === 'probe' ? `<div class="muted" style="margin-top:2px">Valid: ${d.aliveCount != null ? d.aliveCount : 0}${d.probeDone != null && d.aliveCount != null ? ' · Dropped: ' + Math.max(0, d.probeDone - d.aliveCount) : ''}</div>` : '';
   $("sched-info").innerHTML = `
     <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
       <span class="chip ${d.running ? 'chip-ok' : 'chip-bad'}">${d.running ? 'running' : 'stopped'}</span>
