@@ -805,10 +805,14 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 		})
 	}
 
-	// Geo-resolve + upsert each node into state.
+	// Persist every parsed node cheaply — NO geo/mmdb lookup here. Geo is
+	// deferred to after the probe, where it runs only for ALIVE nodes (see
+	// below). This avoids paying the 500k-node mmdb cost at parse/persist time.
+	// Dead nodes reach the DB with an empty Country; the Alive gate at selection
+	// drops them, so they never need a country.
 	s.setStatus(func(st *Snapshot) {
 		st.Phase = PhaseGeo
-		st.NodesGeoTotal = len(nodes)
+		st.NodesGeoTotal = 0
 		st.NodesGeoDone = 0
 	})
 	type enriched struct {
@@ -816,53 +820,25 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 		country string
 		hash    string
 	}
-	// ponytail: GeoFn (DNS + mmdb) is the slow part, so resolve countries in a
-	// bounded worker pool. SQLite allows only one writer, so the cheap upsert is
-	// done serially afterward — parallelism targets the geo lookup, not the DB.
-	countries := make([]string, len(nodes))
-	var geoWg sync.WaitGroup
-	sem := make(chan struct{}, 32)
-	var geoMu sync.Mutex
-	var geoErr error
+	var enrichedNodes []enriched
 	for i := range nodes {
 		if cctx.Err() != nil {
 			break
 		}
-		geoWg.Add(1)
-		sem <- struct{}{}
-		go func(i int) {
-			defer geoWg.Done()
-			defer func() { <-sem }()
-			countries[i] = s.GeoFn(nodes[i])
-			s.setStatus(func(st *Snapshot) { st.NodesGeoDone++ })
-		}(i)
-	}
-	geoWg.Wait()
-	if cctx.Err() != nil {
-		return nil // ponytail: clean bail on cycle cancellation (no spurious error log)
-	}
-	var enrichedNodes []enriched
-	for i, n := range nodes {
-		n.Country = countries[i]
+		n := nodes[i]
 		hash := nodeHash(&n)
-		if err := s.st.UpsertNodeWithCountry(n, countries[i]); err != nil {
-			geoMu.Lock()
-			if geoErr == nil {
-				geoErr = err
-			}
-			geoMu.Unlock()
-			break
+		// ponytail: cheap upsert — writes the node to state with no geo. SQLite
+		// allows one writer, so this is the only DB write in this loop.
+		if err := s.st.UpsertNode(&n, cycle); err != nil {
+			return fmt.Errorf("scheduler: upsert node: %w", err)
 		}
-		enrichedNodes = append(enrichedNodes, enriched{n: n, country: countries[i], hash: hash})
-	}
-	if geoErr != nil {
-		return fmt.Errorf("scheduler: upsert node: %w", geoErr)
+		enrichedNodes = append(enrichedNodes, enriched{n: n, country: "", hash: hash})
 	}
 	s.setStatus(func(st *Snapshot) { st.NodesUpserted = len(nodes) })
 
-	// Build skip sets for excluded countries/protocols so we don't waste probe
-	// budget on nodes that can never reach a subscription. Country is already
-	// resolved (GeoFn ran above), so both filters are known here.
+	// Build skip sets for excluded protocols. Country-based exclusion is
+	// enforced at selection (below), because the country is only resolved after
+	// the probe and is not yet known here.
 	exclude := make(map[string]bool, len(s.cfg.ExcludeCountries))
 	for _, c := range s.cfg.ExcludeCountries {
 		if c = strings.ToUpper(strings.TrimSpace(c)); c != "" {
@@ -918,12 +894,14 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 		}
 		// ponytail: re-resolve geo by the egress IP captured during the probe so
 		// the country reflects where traffic actually exits (not the possibly
-		// CDN-rewritten server Host). Computed in-memory now, while EgressIP is
-		// still on the node — it is never persisted; we just recompute Country
-		// and refresh the served node's country in state.
+		// CDN-rewritten server Host). Runs ONLY for ALIVE nodes — dead nodes are
+		// dropped by the Alive gate at selection and never need a country. GeoFn
+		// falls back to the node Host when no egress IP was captured, so every
+		// alive node gets a correct Country for the exclude/sort at selection.
+		s.setStatus(func(st *Snapshot) { st.NodesGeoTotal = len(probeNodes) })
 		for i := range enrichedNodes {
 			r, ok := out[enrichedNodes[i].hash]
-			if !ok || r.EgressIP == "" {
+			if !ok || !r.Alive {
 				continue
 			}
 			enrichedNodes[i].n.EgressIP = r.EgressIP
@@ -934,6 +912,7 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 					log.Printf("scheduler: upsert egress country: %v", err)
 				}
 			}
+			s.setStatus(func(st *Snapshot) { st.NodesGeoDone++ })
 		}
 	}
 
@@ -962,8 +941,8 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 	// they can never reach a generated subscription. The min-speed brake drops
 	// nodes whose measured throughput is below the configured floor.
 	// Drop nodes whose resolved country is in the exclude list so they can
-	// never reach a generated subscription (safety net; they were already
-	// skipped at probe time above).
+	// never reach a generated subscription. The country is resolved after the
+	// probe (geo by egress IP) and applied here as the real enforcement point.
 	// Build candidates from the persisted latest measurement. A node keeps its
 	// last-known liveness if this cycle's probe errored, so a transient infra
 	// blip can't silently drop it from the subscription.
