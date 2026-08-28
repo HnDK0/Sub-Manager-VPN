@@ -200,7 +200,7 @@ func (s *Server) Stop() error {
 
 // poll publishes status/pipeline/nodes events when they change.
 func (s *Server) poll(ctx context.Context) {
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 	var lastStatus string
 	var lastNodes, lastAlive int

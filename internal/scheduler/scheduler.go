@@ -817,8 +817,10 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 	// below). This avoids paying the 500k-node mmdb cost at parse/persist time.
 	// Dead nodes reach the DB with an empty Country; the Alive gate at selection
 	// drops them, so they never need a country.
+	// Reset geo counters up front; the phase stays "fetch" while we persist
+	// parsed nodes (geo is deferred to after the probe). Setting PhaseGeo here
+	// would mislabel the long persist phase as geo in the UI with no progress.
 	s.setStatus(func(st *Snapshot) {
-		st.Phase = PhaseGeo
 		st.NodesGeoTotal = 0
 		st.NodesGeoDone = 0
 	})
@@ -946,14 +948,21 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 				aliveIdx = append(aliveIdx, i)
 			}
 		}
+		// Cap geo concurrency so the phase lasts long enough for the web UI to
+		// render a visible progress bar (geo is DNS+mmdb and would otherwise
+		// finish near-instantly at full probe-worker parallelism).
+		geoConc := s.cfg.Workers
+		if geoConc > 64 {
+			geoConc = 64
+		}
 		s.setStatus(func(st *Snapshot) {
 			st.Phase = PhaseGeo
 			st.NodesGeoTotal = len(aliveIdx)
 			st.NodesGeoDone = 0
-			st.GeoWorkers = s.cfg.Workers
+			st.GeoWorkers = geoConc
 		})
 		var geoWg sync.WaitGroup
-		sem := make(chan struct{}, s.cfg.Workers)
+		sem := make(chan struct{}, geoConc)
 		var upsertMu sync.Mutex
 		for _, i := range aliveIdx {
 			if cctx.Err() != nil {
