@@ -135,9 +135,9 @@ func (s *Server) Start(ctx context.Context) error {
 	s.mux.HandleFunc("GET "+p+"/api/status", s.auth(s.handleStatus))
 	s.mux.HandleFunc("GET "+p+"/api/sources", s.auth(s.handleSources))
 	s.mux.HandleFunc("POST "+p+"/api/sources", s.auth(s.handleAddSource))
-	s.mux.HandleFunc("POST "+p+"/api/sources/{id}/toggle", s.auth(s.handleToggleSource))
-	s.mux.HandleFunc("DELETE "+p+"/api/sources/{id}", s.auth(s.handleDeleteSource))
-	s.mux.HandleFunc("PUT "+p+"/api/sources/{id}", s.auth(s.handlePutSource))
+	s.mux.HandleFunc("POST "+p+"/api/sources/toggle", s.auth(s.handleToggleSource))
+	s.mux.HandleFunc("DELETE "+p+"/api/sources", s.auth(s.handleDeleteSource))
+	s.mux.HandleFunc("PUT "+p+"/api/sources", s.auth(s.handlePutSource))
 	s.mux.HandleFunc("GET "+p+"/api/nodes", s.auth(s.handleNodes))
 	s.mux.HandleFunc("GET "+p+"/api/nodes/", s.auth(s.handleNodeConfig))
 	s.mux.HandleFunc("GET "+p+"/api/countries", s.auth(s.handleCountries))
@@ -213,9 +213,10 @@ func (s *Server) poll(ctx context.Context) {
 		case <-ticker.C:
 		snap := s.sch.Status()
 		subs, _ := s.st.ListSubscription()
-		key := fmt.Sprintf("%v|%d|%v|%d|%d|%d|%d|%d|%d|%d|%d",
+		key := fmt.Sprintf("%v|%d|%v|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d|%d",
 			snap.Phase, snap.Cycle, snap.Running, snap.SourceTotal, snap.SourceDone,
-			snap.NodesFetched, snap.NodesAlive, snap.Kept, snap.ProbeTotal, snap.ProbeDone, len(subs))
+			snap.NodesFetched, snap.NodesAlive, snap.Kept, snap.ProbeTotal, snap.ProbeDone,
+			snap.NodesGeoTotal, snap.NodesGeoDone, snap.GeoWorkers, len(subs))
 			if key != lastStatus {
 				lastStatus = key
 				s.hub.Publish(Event{Type: "status", Payload: s.buildStatus()})

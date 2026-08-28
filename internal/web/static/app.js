@@ -271,18 +271,18 @@ $("btn-src-bulk").onclick = async () => {
 };
 
 async function toggleSource(id) {
-  try { await api("/sources/" + encodeURIComponent(id) + "/toggle", { method: "POST" }); loadSources(); }
+  try { await api("/sources/toggle?id=" + encodeURIComponent(id), { method: "POST" }); loadSources(); }
   catch (e) { toast(e.message); }
 }
 async function delSource(id) {
-  try { await api("/sources/" + encodeURIComponent(id), { method: "DELETE" }); loadSources(); }
+  try { await api("/sources?id=" + encodeURIComponent(id), { method: "DELETE" }); loadSources(); }
   catch (e) { toast(e.message); }
 }
 async function editSource(id, currentUrl) {
   const url = prompt("New URL:", currentUrl);
   if (!url || url === currentUrl) return;
   try {
-    await api("/sources/" + encodeURIComponent(id), {
+    await api("/sources?id=" + encodeURIComponent(id), {
       method: "PUT", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url })
     });

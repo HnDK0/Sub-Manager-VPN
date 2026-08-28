@@ -156,7 +156,7 @@ func (s *Server) handleAddSource(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleToggleSource(w http.ResponseWriter, r *http.Request) {
-	id, _ := url.PathUnescape(r.PathValue("id"))
+	id := r.URL.Query().Get("id")
 	list, err := s.reg.ListSources()
 	if err != nil {
 		writeJSONErrorLog(w, http.StatusInternalServerError, "failed to list sources", err)
@@ -181,7 +181,7 @@ func (s *Server) handleToggleSource(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
-	id, _ := url.PathUnescape(r.PathValue("id"))
+	id := r.URL.Query().Get("id")
 	if err := s.reg.RemoveSource(id); err != nil {
 		writeJSONErrorLog(w, http.StatusNotFound, "failed to delete source", err)
 		return
@@ -190,7 +190,7 @@ func (s *Server) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handlePutSource(w http.ResponseWriter, r *http.Request) {
-	id, _ := url.PathUnescape(r.PathValue("id"))
+	id := r.URL.Query().Get("id")
 	var body struct {
 		URL string `json:"url"`
 	}
