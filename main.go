@@ -98,8 +98,11 @@ func main() {
 		Workers:          cfg.Workers,
 		ProbeTimeoutMs:   cfg.ProbeTimeoutMs,
 		MaxPingMs:        cfg.MaxPingMs,
-		ReProbeCycles:    cfg.ReProbeCycles,
-	DeadCycles:       cfg.DeadCycles,
+		ReProbeCycles:       cfg.ReProbeCycles,
+		DeadCycles:          cfg.DeadCycles,
+		SubValidityInterval: cfg.SubValidityInterval.String(),
+		SubPingInterval:     cfg.SubPingInterval.String(),
+		SubTopN:             cfg.SubTopN,
 	}
 	if err := settings.Save(configPath, eff); err != nil {
 		log.Printf("config: save %s: %v", configPath, err)
@@ -206,8 +209,8 @@ func parseFlags() (Config, string) {
 	if n < 3 {
 		n = 3
 	}
-	if n > 5 {
-		n = 5
+	if n > 500 {
+		n = 500
 	}
 
 	return Config{

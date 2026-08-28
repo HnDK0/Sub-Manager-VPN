@@ -197,3 +197,101 @@ func TestFetchConditionalNotModified(t *testing.T) {
 		t.Fatalf("unexpected 304 result: %+v", fs2)
 	}
 }
+
+func TestFetchRepoSubpathRecursive(t *testing.T) {
+	// Path-aware fake GitHub contents API: a subdirectory tree with candidates
+	// nested two levels deep, plus a non-candidate file at root to ignore.
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		var entries []contentEntry
+		switch {
+		case p == "/repos/owner/repo/contents":
+			entries = []contentEntry{
+				{Name: "githubmirror", Path: "githubmirror", Type: "dir"},
+				{Name: "notes.md", Path: "notes.md", Type: "file"},
+			}
+		case p == "/repos/owner/repo/contents/githubmirror":
+			entries = []contentEntry{
+				{Name: "sub1.txt", Path: "githubmirror/sub1.txt", Type: "file"},
+				{Name: "nested", Path: "githubmirror/nested", Type: "dir"},
+			}
+		case p == "/repos/owner/repo/contents/githubmirror/nested":
+			entries = []contentEntry{
+				{Name: "sub2.yaml", Path: "githubmirror/nested/sub2.yaml", Type: "file"},
+			}
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(entries)
+	}))
+	defer api.Close()
+
+	raw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/owner/repo/main/githubmirror/sub1.txt":
+			_, _ = w.Write([]byte("body1"))
+		case "/owner/repo/main/githubmirror/nested/sub2.yaml":
+			_, _ = w.Write([]byte("body2"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer raw.Close()
+
+	f := newTestFetcher(api, raw)
+	src := config.Source{ID: "5", URL: "https://github.com/owner/repo/tree/main/githubmirror", Kind: config.KindRepo, Enabled: true}
+	out, err := f.Fetch(context.Background(), src)
+	if err != nil {
+		t.Fatalf("Fetch repo subpath: %v", err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("expected 2 nested candidates, got %d: %+v", len(out), out)
+	}
+	bodies := map[string]bool{}
+	for _, o := range out {
+		bodies[string(o.Body)] = true
+	}
+	if !bodies["body1"] || !bodies["body2"] {
+		t.Fatalf("missing expected bodies: %+v", bodies)
+	}
+}
+
+func TestFetchRepoSubpathIgnoredAtRoot(t *testing.T) {
+	// Bare repo URL: only root-level candidates are fetched; a non-candidate
+	// root file is skipped and directories are recursed (guarded against the
+	// identical-entries mock returning the same listing for sub-paths).
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		entries := []contentEntry{
+			{Name: "subscription.txt", Path: "subscription.txt", Type: "file"},
+			{Name: "assets", Path: "assets", Type: "dir"},
+			{Name: "README.md", Path: "README.md", Type: "file"},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(entries)
+	}))
+	defer api.Close()
+
+	raw := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/owner/repo/main/subscription.txt" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte("repo-sub-body"))
+	}))
+	defer raw.Close()
+
+	f := newTestFetcher(api, raw)
+	src := config.Source{ID: "6", URL: "https://github.com/owner/repo", Kind: config.KindRepo, Enabled: true}
+	out, err := f.Fetch(context.Background(), src)
+	if err != nil {
+		t.Fatalf("Fetch repo: %v", err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("expected 1 candidate, got %d: %+v", len(out), out)
+	}
+	if string(out[0].Body) != "repo-sub-body" {
+		t.Fatalf("unexpected body: %q", out[0].Body)
+	}
+}

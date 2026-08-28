@@ -182,46 +182,76 @@ func (f *Fetcher) fetchRawURL(ctx context.Context, rawURL string) ([]FetchedSour
 }
 
 // fetchRepo resolves a github.com/owner/repo URL via the contents API and
-// downloads each candidate subscription file.
+// downloads every candidate subscription file. It honors a /tree/<branch>/<path>
+// sub-path from the URL and recurses into directories, so a source can point at
+// a subdirectory (e.g. githubmirror/) instead of the whole repository.
 func (f *Fetcher) fetchRepo(ctx context.Context, rawURL string) ([]FetchedSource, error) {
-	owner, repo, err := parseRepo(rawURL)
-	if err != nil {
-		return nil, err
-	}
-
-	branch, entries, err := f.listContents(ctx, owner, repo)
+	owner, repo, branch, subPath, err := parseRepoPath(rawURL)
 	if err != nil {
 		return nil, err
 	}
 
 	var out []FetchedSource
-	for _, e := range entries {
-		if e.Type == "dir" {
-			continue // skip directories
-		}
-		if !isCandidate(e.Name) {
+	seen := map[string]bool{}    // dedupe files by path
+	visited := map[string]bool{} // cycle guard for directories
+	queue := []string{subPath}
+	for len(queue) > 0 {
+		path := queue[0]
+		queue = queue[1:]
+		if visited[path] {
 			continue
 		}
-		rawURL := fmt.Sprintf("%s/%s/%s/%s/%s", f.rawBase, owner, repo, branch, e.Path)
-		if err := f.assertHTTPS(rawURL); err != nil {
-			return nil, err
-		}
-		if err := f.assertSafeHost(rawURL); err != nil {
-			return nil, err
-		}
-		body, err := f.fetchRaw(ctx, rawURL)
+		visited[path] = true
+
+		branchUsed, entries, err := f.listContents(ctx, owner, repo, path, branch)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, FetchedSource{URL: rawURL, Body: body})
+		for _, e := range entries {
+			if e.Type == "dir" {
+				queue = append(queue, e.Path)
+				continue
+			}
+			if e.Type != "file" {
+				continue
+			}
+			if !isCandidate(e.Name) || seen[e.Path] {
+				continue
+			}
+			seen[e.Path] = true
+			raw := fmt.Sprintf("%s/%s/%s/%s/%s", f.rawBase, owner, repo, branchUsed, escapePath(e.Path))
+			if err := f.assertHTTPS(raw); err != nil {
+				return nil, err
+			}
+			if err := f.assertSafeHost(raw); err != nil {
+				return nil, err
+			}
+			body, err := f.fetchRaw(ctx, raw)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, FetchedSource{URL: raw, Body: body})
+		}
 	}
 	return out, nil
 }
 
-// listContents queries the contents API, trying "main" then "master".
-func (f *Fetcher) listContents(ctx context.Context, owner, repo string) (string, []contentEntry, error) {
-	for _, branch := range []string{"main", "master"} {
-		u := fmt.Sprintf("%s/repos/%s/%s/contents?ref=%s", f.apiBase, owner, repo, branch)
+// listContents queries the contents API for a given repo path, trying the
+// hinted branch first (if any) then "main" and "master" as fallbacks. It
+// returns the branch that actually resolved so callers can build the matching
+// raw URL. per_page=1000 avoids silently missing files beyond the API default
+// of 30.
+func (f *Fetcher) listContents(ctx context.Context, owner, repo, path, branchHint string) (string, []contentEntry, error) {
+	branches := []string{"main", "master"}
+	if branchHint != "" {
+		branches = []string{branchHint, "main", "master"}
+	}
+	for _, branch := range branches {
+		u := fmt.Sprintf("%s/repos/%s/%s/contents", f.apiBase, owner, repo)
+		if path != "" {
+			u += "/" + escapePath(path)
+		}
+		u += fmt.Sprintf("?ref=%s&per_page=1000", branch)
 		if err := f.assertHTTPS(u); err != nil {
 			return "", nil, err
 		}
@@ -229,7 +259,7 @@ func (f *Fetcher) listContents(ctx context.Context, owner, repo string) (string,
 		if err != nil {
 			var he *httpError
 			if errors.As(err, &he) && he.Status == http.StatusNotFound {
-				continue // try fallback branch
+				continue // try fallback branch / path
 			}
 			return "", nil, err
 		}
@@ -239,7 +269,7 @@ func (f *Fetcher) listContents(ctx context.Context, owner, repo string) (string,
 		}
 		return branch, entries, nil
 	}
-	return "", nil, fmt.Errorf("fetch: repo %s/%s not found on main or master", owner, repo)
+	return "", nil, fmt.Errorf("fetch: repo %s/%s path %q not found on %v", owner, repo, path, branches)
 }
 
 // contentEntry is the subset of the GitHub contents API object we use.
@@ -264,17 +294,38 @@ func isCandidate(name string) bool {
 		strings.Contains(lower, "subscription")
 }
 
-// parseRepo extracts owner/repo from a github.com URL.
-func parseRepo(rawURL string) (string, string, error) {
+// parseRepoPath extracts owner, repo, an explicit branch ("" when the URL is a
+// bare repo root), and the sub-path ("" for the root) from a github.com URL.
+// Both bare repo URLs and /tree/<branch>/<path> URLs are supported so a user
+// can point a source at a subdirectory instead of the whole repository.
+func parseRepoPath(rawURL string) (owner, repo, branch, subPath string, err error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return "", "", fmt.Errorf("fetch: invalid repo url %q: %w", rawURL, err)
+		return "", "", "", "", fmt.Errorf("fetch: invalid repo url %q: %w", rawURL, err)
 	}
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
 	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", fmt.Errorf("fetch: not a owner/repo url: %q", rawURL)
+		return "", "", "", "", fmt.Errorf("fetch: not a owner/repo url: %q", rawURL)
 	}
-	return parts[0], parts[1], nil
+	owner, repo = parts[0], parts[1]
+	if len(parts) >= 4 && parts[2] == "tree" {
+		branch = parts[3]
+		subPath = strings.Join(parts[4:], "/")
+	}
+	return owner, repo, branch, subPath, nil
+}
+
+// escapePath URL-escapes each "/" segment of p without touching the slashes,
+// so directory/file names with spaces or special chars resolve correctly.
+func escapePath(p string) string {
+	if p == "" {
+		return ""
+	}
+	segs := strings.Split(p, "/")
+	for i, s := range segs {
+		segs[i] = url.PathEscape(s)
+	}
+	return strings.Join(segs, "/")
 }
 
 // fetchRaw GETs url and returns the body. HTTPS only; non-2xx is an error.

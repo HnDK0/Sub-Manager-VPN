@@ -810,7 +810,7 @@ const SETTINGS_FIELDS = [
   { key: "sub_topn", label: "Subscription Top N", type: "number", note: "subscription nodes per country (0 = use Top N)" },
   { key: "degrade_ms", label: "Degrade Threshold (ms)", type: "number", note: "0 = median-based auto" },
   { key: "minkeep", label: "Min Keep", type: "number", note: "minimum subscription versions kept" },
-  { key: "corpse_cycles", label: "Corpse Cycles", type: "number", note: "consecutive dead cycles before skipping (0 = disabled)" },
+  { key: "dead_cycles", label: "Corpse Cycles", type: "number", note: "consecutive dead cycles before skipping (0 = disabled)" },
   { key: "workers", label: "Workers", type: "number", note: "concurrent probe goroutines for the embedded mihomo engine (default 32)" },
   { key: "max_ping_ms", label: "Max Ping (ms)", type: "number", note: "drop nodes slower than this from the served subscription (0 = no cap)" },
   { key: "probe_url", label: "Probe URL", type: "text", note: "URL used for latency/delay checks (e.g. http://www.gstatic.com/generate_204)" },
