@@ -52,6 +52,13 @@ type Config struct {
 	SubValidityInterval time.Duration
 	SubPingInterval     time.Duration
 	SubTopN             int
+
+	// CDN rewrite: swap Cloudflare-range server IPs for a working CDN edge IP.
+	CDNEnabled    bool
+	CDNSource     string
+	CDNVWNConfig  string
+	CDNFallbackIP string
+	CDNOverrides  map[string]string
 }
 
 // main parses flags, builds the Config, and delegates all wiring to run so it
@@ -103,6 +110,12 @@ func main() {
 		SubValidityInterval: cfg.SubValidityInterval.String(),
 		SubPingInterval:     cfg.SubPingInterval.String(),
 		SubTopN:             cfg.SubTopN,
+
+		CDNEnabled:    cfg.CDNEnabled,
+		CDNSource:     cfg.CDNSource,
+		CDNVWNConfig:  cfg.CDNVWNConfig,
+		CDNFallbackIP: cfg.CDNFallbackIP,
+		CDNOverrides:  cfg.CDNOverrides,
 	}
 	if err := settings.Save(configPath, eff); err != nil {
 		log.Printf("config: save %s: %v", configPath, err)
@@ -242,6 +255,12 @@ func parseFlags() (Config, string) {
 		SubValidityInterval: *subValidity,
 		SubPingInterval:     *subPing,
 		SubTopN:             *subTopN,
+
+		CDNEnabled:    loaded.CDNEnabled,
+		CDNSource:     loaded.CDNSource,
+		CDNVWNConfig:  firstNonEmpty(loaded.CDNVWNConfig, "/usr/local/etc/xray/connect_host"),
+		CDNFallbackIP: loaded.CDNFallbackIP,
+		CDNOverrides:  loaded.CDNOverrides,
 	}, configPath
 }
 
@@ -371,7 +390,14 @@ func runInner(ctx context.Context, cfg Config, sch *scheduler.Scheduler, skipUI 
 		SubValidityInterval: cfg.SubValidityInterval,
 		SubPingInterval:     cfg.SubPingInterval,
 		SubTopN:             cfg.SubTopN,
-		IsBanned:            bansStore.Has,
+
+		CDNEnabled:    cfg.CDNEnabled,
+		CDNSource:     cfg.CDNSource,
+		CDNVWNConfig:  cfg.CDNVWNConfig,
+		CDNFallbackIP: cfg.CDNFallbackIP,
+		CDNOverrides:  cfg.CDNOverrides,
+
+		IsBanned: bansStore.Has,
 	}
 	if sch == nil {
 		sch, err = scheduler.New(schedCfg)

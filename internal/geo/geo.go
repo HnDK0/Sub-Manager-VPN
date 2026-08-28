@@ -106,6 +106,19 @@ func (m *Manager) defaultResolve(ctx context.Context, host string) (net.IP, erro
 //
 // It never panics and never crashes when the database is absent.
 func (m *Manager) ResolveCountry(n *model.Node) (string, error) {
+	// Prefer the egress IP captured during the mihomo probe: it is where traffic
+	// actually exits (the node's real location), not the (possibly CDN-rewritten)
+	// server Host. When present we use it INSTEAD of Host and never fall back to
+	// Host; an unresolvable egress IP yields "" (geo unknown), preserving the
+	// existing unknown -> "" behavior and the higher-level name fallback.
+	if n.EgressIP != "" {
+		if ip := net.ParseIP(n.EgressIP); ip != nil && m.lookup != nil {
+			if country, err := m.lookup(ip); err == nil && country != "" {
+				return country, nil
+			}
+		}
+		return "", nil
+	}
 	host := n.Host
 	ip := net.ParseIP(host)
 	if ip == nil {

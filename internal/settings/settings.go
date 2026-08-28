@@ -43,6 +43,14 @@ type Settings struct {
 	SubValidityInterval string   `json:"sub_validity_interval"` // e.g. "5m"
 	SubPingInterval     string   `json:"sub_ping_interval"`     // e.g. "30m"
 	SubTopN             int      `json:"sub_topn"`              // 0 = use TopN
+
+	// CDN rewrite: swap Cloudflare-range server IPs for a working CDN edge IP
+	// (preserving SNI / ws-gRPC Host so TLS still validates).
+	CDNEnabled    bool              `json:"cdn_enabled"`
+	CDNSource     string            `json:"cdn_source"`     // "vwn" | "manual"
+	CDNVWNConfig  string            `json:"cdn_vwn_config"` // VWNpy connect_host path
+	CDNFallbackIP string            `json:"cdn_fallback_ip"`
+	CDNOverrides  map[string]string `json:"cdn_overrides"` // host -> CDN IP
 }
 
 // Default returns the non-path defaults. Paths are left empty; the caller (main)
@@ -60,6 +68,8 @@ func Default() Settings {
 		DeadCycles:          84, // ~1 week at the 2h default interval
 		SubValidityInterval: "5m",
 		SubPingInterval:     "30m",
+
+		CDNVWNConfig: "/usr/local/etc/xray/connect_host",
 	}
 }
 

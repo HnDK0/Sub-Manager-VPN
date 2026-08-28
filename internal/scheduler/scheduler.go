@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"vpn-sub-manager/internal/config"
+	"vpn-sub-manager/internal/cdn"
 	"vpn-sub-manager/internal/fetch"
 	"vpn-sub-manager/internal/filter"
 	"vpn-sub-manager/internal/geo"
@@ -29,6 +30,7 @@ import (
 	"vpn-sub-manager/internal/model"
 	"vpn-sub-manager/internal/parse"
 	selector "vpn-sub-manager/internal/select"
+	"vpn-sub-manager/internal/settings"
 	"vpn-sub-manager/internal/state"
 )
 
@@ -91,6 +93,13 @@ type Config struct {
 	SubPingInterval time.Duration
 	// SubTopN caps subscription output members per country. 0 defaults to TopN.
 	SubTopN int
+
+	// CDN rewrite: swap Cloudflare-range server IPs for a working CDN edge IP.
+	CDNEnabled    bool
+	CDNSource     string
+	CDNVWNConfig  string
+	CDNFallbackIP string
+	CDNOverrides  map[string]string
 
 	// IsBanned reports whether a node hash is banned and must be excluded from
 	// selection (so it never reaches a subscription). Nil disables banning.
@@ -398,6 +407,15 @@ func (s *Scheduler) parseFetched(fetched []fetch.FetchedSource) []model.Node {
 			log.Printf("scheduler: parse %s failed: %v", fs.URL, err)
 			continue
 		}
+		// CDN rewrite: swap Cloudflare-range server IPs for a working edge IP
+		// before filtering, so the rewritten host flows through the whole pipeline.
+		parsed = cdn.Rewrite(parsed, settings.Settings{
+			CDNEnabled:    s.cfg.CDNEnabled,
+			CDNSource:     s.cfg.CDNSource,
+			CDNVWNConfig:  s.cfg.CDNVWNConfig,
+			CDNFallbackIP: s.cfg.CDNFallbackIP,
+			CDNOverrides:  s.cfg.CDNOverrides,
+		})
 		s.setStatus(func(st *Snapshot) { st.Parsed += len(parsed) })
 
 		// ponytail: mirror filter.Apply's order (Dedup -> DropBroken ->
@@ -894,8 +912,28 @@ func (s *Scheduler) Cycle(ctx context.Context) error {
 		if err := s.engine.SyncNodes(probeNodes); err != nil {
 			log.Printf("scheduler: sync nodes: %v", err)
 		}
-		if _, e := s.ProbeFn(cctx, probeNodes); e != nil {
+		out, e := s.ProbeFn(cctx, probeNodes)
+		if e != nil {
 			return fmt.Errorf("scheduler: probe: %w", e)
+		}
+		// ponytail: re-resolve geo by the egress IP captured during the probe so
+		// the country reflects where traffic actually exits (not the possibly
+		// CDN-rewritten server Host). Computed in-memory now, while EgressIP is
+		// still on the node — it is never persisted; we just recompute Country
+		// and refresh the served node's country in state.
+		for i := range enrichedNodes {
+			r, ok := out[enrichedNodes[i].hash]
+			if !ok || r.EgressIP == "" {
+				continue
+			}
+			enrichedNodes[i].n.EgressIP = r.EgressIP
+			if cc := s.GeoFn(enrichedNodes[i].n); cc != "" {
+				enrichedNodes[i].country = cc
+				enrichedNodes[i].n.Country = cc
+				if err := s.st.UpsertNodeWithCountry(enrichedNodes[i].n, cc); err != nil {
+					log.Printf("scheduler: upsert egress country: %v", err)
+				}
+			}
 		}
 	}
 

@@ -65,4 +65,9 @@ type Node struct {
 	Raw        string            // original URI (quarantined, never emitted)
 	Source     string            // source URL/id the node came from
 	Country    string            // resolved ISO country code (geo); used in output naming, empty => "XX"
+	// EgressIP is the actual IP we exit through the node (as seen by the target
+	// server during the mihomo probe). Used for geo-by-egress so the country
+	// reflects the real exit location, not the (possibly CDN-rewritten) Host.
+	// Not serialized into node_json output.
+	EgressIP string `json:"-"`
 }

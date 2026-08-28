@@ -7,13 +7,17 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	C "github.com/metacubex/mihomo/constant"
 	"vpn-sub-manager/internal/model"
 
 	"github.com/metacubex/mihomo/adapter/outboundgroup"
@@ -226,6 +230,90 @@ func (c *Controller) Latency(ctx context.Context, hash string, url string, timeo
 	return int(d), nil
 }
 
+// egressIP dials traceURL THROUGH the specific proxy (hash) and returns the
+// egress IP the target server sees (the "ip=<addr>" line in the Cloudflare
+// /cdn-cgi/trace body). It uses mihomo's native per-proxy DialContext, so the
+// request exits through THIS node only — no shared OUT-selector mutation, which
+// would race under the concurrent probe fan-out and capture the wrong node's
+// egress. Any failure returns "" (geo falls back to the node name) instead of
+// failing the probe.
+func (c *Controller) egressIP(ctx context.Context, hash, traceURL string) string {
+	c.mu.RLock()
+	pr, ok := tunnel.Proxies()[hash]
+	c.mu.RUnlock()
+	if !ok {
+		return ""
+	}
+	u, err := url.Parse(traceURL)
+	if err != nil {
+		return ""
+	}
+	host := u.Hostname()
+	port := u.Port()
+	if port == "" {
+		if u.Scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	p, err := strconv.ParseUint(port, 10, 16)
+	if err != nil {
+		return ""
+	}
+	// Dial a raw TCP tunnel to the target through the node, then TLS over it.
+	conn, err := pr.DialContext(ctx, &C.Metadata{
+		NetWork: C.TCP,
+		Type:    C.HTTPS,
+		Host:    host,
+		DstPort: uint16(p),
+	})
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	tlsConn := tls.Client(conn, &tls.Config{ServerName: host, InsecureSkipVerify: true, NextProtos: []string{"http/1.1"}})
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		return ""
+	}
+	defer tlsConn.Close()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, traceURL, nil)
+	if err != nil {
+		return ""
+	}
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			// The connection is already TLS-handshaked; hand it to net/http as-is.
+			DialTLSContext: func(context.Context, string, string) (net.Conn, error) {
+				return tlsConn, nil
+			},
+		},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return ""
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(body), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "ip=") {
+			ip := strings.TrimSpace(strings.TrimPrefix(line, "ip="))
+			if net.ParseIP(ip) != nil {
+				return ip
+			}
+		}
+	}
+	return ""
+}
+
 // Speed selects the node on the OUT selector and downloads through mixed-port.
 func (c *Controller) Speed(ctx context.Context, hash string, url string) (int64, error) {
 	c.inflight.Add(1)
@@ -289,6 +377,12 @@ func (c *Controller) Probe(ctx context.Context, n model.Node) (Result, error) {
 		return Result{ProbeCount: 1}, nil
 	}
 	r := Result{Alive: true, LatencyMs: int64(lat), ProbeCount: 1}
+	// Capture the actual egress IP (geo-by-egress): the trace URL body carries
+	// "ip=<addr>". Best-effort — a failure leaves EgressIP empty and geo falls
+	// back to the node name rather than failing the probe.
+	if eg := c.egressIP(ctx, h, c.opts.ProbeURL); eg != "" {
+		r.EgressIP = eg
+	}
 	if speedWanted(ctx) {
 		if sp, serr := c.Speed(ctx, h, c.opts.SpeedTestURL); serr == nil {
 			r.SpeedKbps = sp

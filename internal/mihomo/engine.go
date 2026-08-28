@@ -12,6 +12,10 @@ type Result struct {
 	LatencyMs  int64
 	SpeedKbps  int64
 	ProbeCount int
+	// EgressIP is the actual IP we exit through the node (as seen by the target
+	// server during the probe). Empty when the trace body could not be fetched;
+	// geo then falls back to the node name. Not persisted.
+	EgressIP string
 }
 
 // Options configures the embedded mihomo probe engine.
@@ -60,8 +64,10 @@ func New(opts Options) *Controller {
 	}
 	if opts.ProbeURL == "" {
 		// Contentful target (not a bare 204) so a fake/MITM node that
-		// synthesizes an empty 204 locally fails the probe.
-		opts.ProbeURL = "https://cp.cloudflare.com/"
+		// synthesizes an empty 204 locally fails the probe. The /cdn-cgi/trace
+		// body also carries the egress IP (line "ip=<addr>") captured during the
+		// probe for geo-by-egress (see Controller.egressIP).
+		opts.ProbeURL = "https://cp.cloudflare.com/cdn-cgi/trace"
 	}
 	if opts.SpeedTestURL == "" {
 		opts.SpeedTestURL = "http://speedtest.selectel.ru/10MB"

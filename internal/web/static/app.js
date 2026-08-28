@@ -828,6 +828,11 @@ const SETTINGS_FIELDS = [
   { key: "out_dir", label: "Output Dir", type: "text", note: "generated subscriptions directory", readonly: true },
   { key: "exclude_countries", label: "Exclude Countries", type: "countries", note: "comma-separated ISO codes to exclude from subscriptions (e.g. ru,cn)" },
   { key: "exclude_protocols", label: "Exclude Protocols", type: "protocols", note: "protocols to skip probing entirely (e.g. vmess,tuic,ss)" },
+  { key: "cdn_enabled", label: "CDN Rewrite", type: "checkbox", note: "rewrite Cloudflare-range server IPs to a working CDN edge IP (preserves SNI / ws-gRPC Host)" },
+  { key: "cdn_source", label: "CDN Source", type: "select", options: [["vwn", "VWN (connect_host file)"], ["manual", "Manual fallback IP"]], note: "how the working CDN IP is obtained" },
+  { key: "cdn_vwn_config", label: "VWN Config Path", type: "text", note: "path to the VWNpy connect_host file (default /usr/local/etc/xray/connect_host)" },
+  { key: "cdn_fallback_ip", label: "Fallback CDN IP", type: "text", note: "manual CDN IP, or fallback when the VWN file is missing/empty" },
+  { key: "cdn_overrides", label: "CDN Overrides", type: "textarea", note: "per-host override, one 'domain=ip' per line; takes precedence over the auto-resolved CDN IP" },
 ];
 
 async function loadSettings() {
@@ -842,6 +847,31 @@ async function loadSettings() {
         return `<div class="settings-field">
           <label>${esc(f.label)}</label>
           <div id="sf-${f.key}" class="chip-checks"></div>
+          <span class="field-note">${esc(f.note)}</span>
+        </div>`;
+      }
+      if (f.type === "checkbox") {
+        return `<div class="settings-field">
+          <label><input type="checkbox" id="sf-${f.key}" ${s[f.key] ? "checked" : ""} data-key="${esc(f.key)}" /> ${esc(f.label)}</label>
+          <span class="field-note">${esc(f.note)}</span>
+        </div>`;
+      }
+      if (f.type === "select") {
+        const opts = (f.options || []).map(([v, l]) =>
+          `<option value="${esc(v)}" ${s[f.key] === v ? "selected" : ""}>${esc(l)}</option>`).join("");
+        return `<div class="settings-field">
+          <label for="sf-${f.key}">${esc(f.label)}</label>
+          <select id="sf-${f.key}" data-key="${esc(f.key)}">${opts}</select>
+          <span class="field-note">${esc(f.note)}</span>
+        </div>`;
+      }
+      if (f.type === "textarea") {
+        const val = (s[f.key] && typeof s[f.key] === "object")
+          ? Object.entries(s[f.key]).map(([k, v]) => k + "=" + v).join("\n")
+          : "";
+        return `<div class="settings-field">
+          <label for="sf-${f.key}">${esc(f.label)}</label>
+          <textarea id="sf-${f.key}" rows="4" data-key="${esc(f.key)}">${esc(val)}</textarea>
           <span class="field-note">${esc(f.note)}</span>
         </div>`;
       }
@@ -913,6 +943,28 @@ async function saveSettings(current) {
     if (!el || el.readOnly) return;
     if (f.type === "countries" || f.type === "protocols") {
       patch[f.key] = [...el.querySelectorAll("input[type=checkbox]:checked")].map(cb => cb.value.toUpperCase());
+      return;
+    }
+    if (f.type === "checkbox") {
+      patch[f.key] = el.checked;
+      return;
+    }
+    if (f.type === "select") {
+      patch[f.key] = el.value;
+      return;
+    }
+    if (f.type === "textarea") {
+      const m = {};
+      el.value.split("\n").forEach(line => {
+        const t = line.trim();
+        if (!t) return;
+        const i = t.indexOf("=");
+        if (i < 0) return;
+        const k = t.slice(0, i).trim();
+        const v = t.slice(i + 1).trim();
+        if (k) m[k] = v;
+      });
+      patch[f.key] = m;
       return;
     }
     const val = el.value.trim();
